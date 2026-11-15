@@ -18,6 +18,11 @@ const PLATFORM_BY_MACHINE: Record<string, string> = {
   arm64: "linux-arm64"
 };
 
+// Shared libraries Node's Linux builds link against that a minimal image does
+// not ship. libatomic.so.1 is the arm64 blocker observed live: without it node
+// exists on disk but cannot exec ("error while loading shared libraries").
+const NODE_RUNTIME_PACKAGES = ["libatomic1", "ca-certificates"] as const;
+
 export type GuestExecutor = (
   id: string,
   args: readonly string[],
@@ -34,7 +39,11 @@ export function resolveNodePlatform(machine: string): string {
 
 // Pure so the verification step is testable without a guest. Every value is
 // validated or derived, never interpolated from caller input unexamined.
-export function nodeInstallScript(version: string, platform: string): string {
+export function nodeInstallScript(
+  version: string,
+  platform: string,
+  aptDateCheckDisabled = false
+): string {
   if (!NODE_VERSION_PATTERN.test(version)) {
     throw new Error(`Invalid Node version: ${version}`);
   }
@@ -44,10 +53,18 @@ export function nodeInstallScript(version: string, platform: string): string {
   const archive = `node-${version}-${platform}.tar.xz`;
   const installRoot = "/usr/local/lib/nodejs";
   const extracted = `${installRoot}/${archive.replace(/\.tar\.xz$/, "")}`;
+  const aptOptions = aptDateCheckDisabled ? " -o Acquire::Check-Date=false" : "";
   return `set -eu
 if [ "$(id -u)" -ne 0 ]; then echo "guest provisioning must run as root" >&2; exit 1; fi
 command -v curl >/dev/null 2>&1 || { echo "curl is required in the guest" >&2; exit 1; }
 command -v xz >/dev/null 2>&1 || { echo "xz-utils is required in the guest" >&2; exit 1; }
+# Node's Linux binaries are not fully static: the arm64 build needs the GCC
+# atomic runtime, which a minimal image does not ship. Installing the toolchain
+# without this leaves a node that cannot exec at all.
+if command -v apt-get >/dev/null 2>&1; then
+  apt-get${aptOptions} update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get${aptOptions} install -y -qq ${NODE_RUNTIME_PACKAGES.join(" ")}
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$work"
@@ -63,6 +80,9 @@ tar -xJf ${archive} -C ${installRoot}
 for tool in node npm npx; do
   ln -sf ${extracted}/bin/$tool /usr/local/bin/$tool
 done
+# Last line, and the only one that proves the toolchain actually executes:
+# a missing shared library fails here rather than silently installing a node
+# that cannot run.
 /usr/local/bin/node --version
 `;
 }
@@ -73,7 +93,12 @@ export type GuestNodeInstallResult = {
 };
 
 export class GuestProvisioner {
-  constructor(private readonly execute: GuestExecutor) {}
+  // aptDateCheckDisabled is opt-in and exists only for hosts whose clock is
+  // ahead of the repositories; it relaxes the date check, never signatures.
+  constructor(
+    private readonly execute: GuestExecutor,
+    private readonly aptDateCheckDisabled = false
+  ) {}
 
   // Reads the guest's own architecture rather than assuming the worker's, so a
   // mismatched download fails loudly instead of installing a binary that
@@ -89,7 +114,7 @@ export class GuestProvisioner {
     // timeout is far too short for either.
     const reported = await this.execute(
       id,
-      ["sh", "-c", nodeInstallScript(version, platform)],
+      ["sh", "-c", nodeInstallScript(version, platform, this.aptDateCheckDisabled)],
       15 * 60_000
     );
     const installed = reported.trim().split("\n").at(-1)?.trim() ?? "";

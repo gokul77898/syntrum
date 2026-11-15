@@ -45,7 +45,28 @@ test("the install script verifies the download against the published checksum", 
   assert.equal(script.includes("curl -fsSL https://nodejs.org/dist | "), false);
 });
 
-test("the script fails closed when curl or xz is missing", () => {
+// Observed live: Node's arm64 build needs libatomic.so.1, which a minimal
+// image does not ship, so node existed on disk but could not exec. Installing
+// the toolchain without its shared libraries is not an install.
+test("the install script installs Node's shared-library dependencies", () => {
+  const script = nodeInstallScript("v26.13.0", "linux-arm64");
+  assert.match(script, /apt-get.*install[^\n]*libatomic1/);
+  // The final line is what proves it executes; it must come after the install.
+  assert.ok(
+    script.indexOf("libatomic1") < script.lastIndexOf("/usr/local/bin/node --version"),
+    "the runtime packages are installed before node is proven to run"
+  );
+});
+
+test("the apt date override is opt-in and off by default", () => {
+  assert.equal(nodeInstallScript("v26.13.0", "linux-arm64").includes("Check-Date"), false);
+  assert.match(
+    nodeInstallScript("v26.13.0", "linux-arm64", true),
+    /Check-Date=false/
+  );
+});
+
+test("the install script fails closed when curl or xz is missing", () => {
   const script = nodeInstallScript("v26.13.0", "linux-arm64");
   assert.match(script, /command -v curl/);
   assert.match(script, /command -v xz/);

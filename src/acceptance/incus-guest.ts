@@ -49,7 +49,8 @@ async function main(): Promise<void> {
     store, driver, workerHost: "gokul@worker", desktopEnabled: false
   });
   const provisioner = new GuestProvisioner(
-    async (id, args, timeoutMs) => (await driver.execute?.(id, args, timeoutMs)) ?? ""
+    async (id, args, timeoutMs) => (await driver.execute?.(id, args, timeoutMs)) ?? "",
+    Boolean(process.env.SYNTRUM_WORKER_APT_CONF)
   );
 
   let computerId: string | undefined;
@@ -71,22 +72,8 @@ async function main(): Promise<void> {
       .then(value => value.trim() || "(empty)")
       .catch(error => `(unavailable: ${errorMessage(error, "failed")})`);
 
-    // curl and xz are what the install script requires; the base image has
-    // neither, so bootstrap them the way the desktop path does. A skewed worker
-    // clock makes apt reject its own Release files as "not valid yet", so the
-    // same opt-in date override is applied here — the same one the driver
-    // passes to cloud-init.
-    const aptConf = process.env.SYNTRUM_WORKER_APT_CONF;
-    const aptOptions = aptConf
-      ? `-o Acquire::Check-Date=false`
-      : "";
-    await driver.execute?.(computerId, [
-      "sh", "-c",
-      `apt-get ${aptOptions} update -qq && ` +
-      `DEBIAN_FRONTEND=noninteractive apt-get ${aptOptions} install -y -qq curl xz-utils`
-    ], 10 * 60_000);
-    evidence.bootstrapped = true;
-
+    // curl and xz are what the install script requires, and it installs them
+    // itself along with Node's shared-library dependencies.
     const installed = await provisioner.installNode(computerId, NODE_VERSION);
     evidence.installed = installed;
 
