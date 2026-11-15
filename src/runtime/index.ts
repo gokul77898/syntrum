@@ -1,6 +1,7 @@
 export { RuntimeError } from "./errors.js";
 export { createConsoleLogger, log, silentLogger } from "./logger.js";
 export { ExecFileNativeManager } from "./native-manager.js";
+export { LinuxNativeManager } from "./linux-native-manager.js";
 export { RuntimeSupervisor } from "./supervisor.js";
 export type { RuntimeSupervisorOptions } from "./supervisor.js";
 export type {
