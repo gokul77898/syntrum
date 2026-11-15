@@ -232,6 +232,12 @@ async function main(): Promise<void> {
   server.listen(4318, "127.0.0.1", () => {
     console.log("SYNTRUM cloud control plane listening on http://127.0.0.1:4318");
   });
+
+  // The browser surface runs as its own process (`src/cloud/browser-ui.ts`), so
+  // the control plane keeps a bearer-only contract and the UI is the only place
+  // that exchanges that token for a cookie. It also owns the desktop gateway,
+  // because the WebSocket upgrade needs the session cookie this server does
+  // not issue. Start it separately; do not mount it here.
   const shutdown = () => server.close(() => {
     gpuScheduler.close();
     workerStore.close();

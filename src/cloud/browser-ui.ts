@@ -535,7 +535,13 @@ async function main(): Promise<void> {
   const server = createBrowserUi({
     cloudBaseUrl: process.env.SYNTRUM_CLOUD_URL ?? "http://127.0.0.1:4318",
     operatorToken: required("CLOUD_AI_OS_OPERATOR_TOKEN"),
-    webRoot: process.env.SYNTRUM_WEB_ROOT ?? new URL("../../web/", import.meta.url).pathname
+    webRoot: process.env.SYNTRUM_WEB_ROOT ?? new URL("../../web/", import.meta.url).pathname,
+    // Without these the desktop gateway stays disabled and the workspace
+    // viewport reports "gateway not configured" — which is honest, but means
+    // no desktop can ever be reached from the browser.
+    workerHost: process.env.SYNTRUM_WORKER_HOST,
+    workerKnownHostsPath: process.env.SYNTRUM_WORKER_SSH_KNOWN_HOSTS,
+    workerIdentityFile: process.env.SYNTRUM_WORKER_SSH_IDENTITY_FILE
   });
 
   server.listen(port, host, () => {
