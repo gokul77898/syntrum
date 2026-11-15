@@ -122,9 +122,14 @@ async function main(): Promise<void> {
       throw new Error("The X display did not answer xdpyinfo");
     }
 
+    // The port the store allocated, not a fixed 6080: websockify binds the
+    // per-computer desktopPort the API will actually hand to the gateway.
+    const desktopPort = computer.desktopPort;
+
     // The browser entrypoint must actually serve the noVNC client.
     const novnc = await guest(computerId, [
-      "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:6080/vnc.html"
+      "curl", "--fail", "--silent", "--show-error",
+      `http://127.0.0.1:${desktopPort}/vnc.html`
     ]);
     evidence.novncBytes = novnc.length;
     if (!novnc.includes("noVNC")) {
@@ -139,8 +144,8 @@ async function main(): Promise<void> {
     }
     const listening = await guest(computerId, ["ss", "-lnt"]);
     evidence.listening = listening.split("\n")
-      .filter(line => /:5900|:6080/.test(line)).map(line => line.trim());
-    if (!listening.includes("0.0.0.0:6080")) {
+      .filter(line => /:5900|:6080|:2000\d/.test(line)).map(line => line.trim());
+    if (!listening.includes(`0.0.0.0:${desktopPort}`)) {
       throw new Error(`websockify is not bound on the container port: ${listening}`);
     }
     if (!listening.includes("127.0.0.1:5900")) {
