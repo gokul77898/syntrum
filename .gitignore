@@ -1,0 +1,7 @@
+node_modules/
+.build/
+data/
+.claude-flow/
+.syntrum-operator-token
+*.log
+.DS_Store

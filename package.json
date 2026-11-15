@@ -1,0 +1,38 @@
+{
+  "name": "cloud-ai-os",
+  "version": "1.0.0",
+  "description": "SYNTRUM agent-native dual-head runtime prototype",
+  "scripts": {
+    "test": "node --import tsx --test test/*.test.ts",
+    "test:live-antigravity": "tsx src/acceptance/live-antigravity.ts",
+    "test:live-antigravity-manual": "tsx src/acceptance/manual-antigravity.ts",
+    "test:live-incus": "tsx src/acceptance/incus-worker.ts",
+    "test:live-vscode": "tsx src/acceptance/live-vscode.ts",
+    "test:live-adapter": "CLOUD_AI_OS_LIVE_VSCODE_TEST=1 node --import tsx --test test/dual-head-extension-host.test.ts",
+    "benchmark": "tsx src/benchmarks/run.ts",
+    "mcp:stdio": "tsx src/mcp/stdio.ts",
+    "check:extension": "node --check adapters/vscode-extension/extension.js",
+    "build:native": "npm run build:app-manager && npm run build:gui-input",
+    "build:app-manager": "swiftc -parse-as-library native/app-manager.swift -o .build/app-manager -framework AppKit -framework Foundation",
+    "build:gui-input": "swiftc -parse-as-library native/gui-input.swift -o .build/gui-input -framework AppKit -framework Foundation -framework CoreGraphics",
+    "dev": "tsx watch src/server.ts",
+    "cloud:dev": "tsx src/cloud/server.ts",
+    "ui": "tsx src/cloud/browser-ui.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2"
+  }
+}

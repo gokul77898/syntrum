@@ -1,0 +1,27 @@
+{
+  "name": "cloud-ai-os-vscode-bridge",
+  "displayName": "Cloud AI OS Workspace Bridge",
+  "description": "Authenticated extension-host document bridge for Cloud AI OS",
+  "version": "0.1.0",
+  "publisher": "cloud-ai-os",
+  "private": true,
+  "license": "ISC",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "main": "./extension.js",
+  "extensionKind": [
+    "ui"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
+  "scripts": {
+    "check": "node --check extension.js"
+  }
+}
