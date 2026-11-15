@@ -269,10 +269,13 @@ export class IncusWorkerDriver implements WorkerDriver {
   // cloud-init exiting 0 only means the units were written and started.
   // A desktop that is not actually up must fail, not be reported ready.
   async verifyDesktop(id: string): Promise<void> {
+    // `|| true`: systemctl is-active exits 4 when any unit is inactive, and the
+    // command runner treats a non-zero exit as a failure — which would throw
+    // the raw runner message and skip the per-unit diagnosis below.
     const output = await this.run([
-      "exec", id, "--", "systemctl", "is-active",
-      "syntrum-xvfb.service", "syntrum-desktop.service",
-      "syntrum-vnc.service", "syntrum-novnc.service"
+      "exec", id, "--", "sh", "-c",
+      "systemctl is-active syntrum-xvfb.service syntrum-desktop.service " +
+      "syntrum-vnc.service syntrum-novnc.service || true"
     ]);
     const states = output.trim().split(/\s+/);
     const failed = DESKTOP_UNITS.filter((_, index) => states[index] !== "active");

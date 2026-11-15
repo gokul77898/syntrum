@@ -115,9 +115,23 @@ test("the apt date override is injected only when configured", async () => {
   assert.match(conf, /Acquire::Check-Date/);
 });
 
+// systemctl is-active exits 4 when any unit is inactive, and the runner treats
+// a non-zero exit as a failure. Without `|| true` the probe throws the raw
+// runner message and the per-unit diagnosis below it is unreachable — which is
+// how a live run reported bare "inactive" four times instead of naming a unit.
+test("the is-active probe masks a non-zero exit so states stay readable", async () => {
+  const calls: string[][] = [];
+  const driver = new IncusWorkerDriver(runner(calls));
+  await driver.verifyDesktop(spec.id).catch(() => {});
+  const probe = calls.find(args => args.some(a => a.includes("systemctl is-active")));
+  assert.ok(probe, "the probe runs");
+  const script = probe.find(a => a.includes("systemctl is-active")) ?? "";
+  assert.match(script, /\|\|\s*true$/, "inactive units must not surface as a command failure");
+});
+
 test("desktop verification accepts only all-active units", async () => {
   const driver = new IncusWorkerDriver(async args => {
-    if (args.includes("systemctl")) return "active\nactive\nactive\nactive\n";
+    if (args.some(a => a.includes("systemctl is-active"))) return "active\nactive\nactive\nactive\n";
     return args[1] === "list" ? '[{"status":"Running"}]' : "";
   });
   await driver.verifyDesktop(spec.id);
@@ -125,7 +139,7 @@ test("desktop verification accepts only all-active units", async () => {
 
 test("desktop verification names the inactive unit and does not pass", async () => {
   const driver = new IncusWorkerDriver(async args => {
-    if (args.includes("systemctl")) return "active\nactivating\nactive\nfailed\n";
+    if (args.some(a => a.includes("systemctl is-active"))) return "active\nactivating\nactive\nfailed\n";
     return args[1] === "list" ? '[{"status":"Running"}]' : "";
   });
   await assert.rejects(
@@ -136,7 +150,7 @@ test("desktop verification names the inactive unit and does not pass", async () 
 
 test("truncated unit output is treated as failure, not as success", async () => {
   const driver = new IncusWorkerDriver(async args => {
-    if (args.includes("systemctl")) return "active\n";
+    if (args.some(a => a.includes("systemctl is-active"))) return "active\n";
     return args[1] === "list" ? '[{"status":"Running"}]' : "";
   });
   await assert.rejects(driver.verifyDesktop(spec.id), /Desktop services not active/);

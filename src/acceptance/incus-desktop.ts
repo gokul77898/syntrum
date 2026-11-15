@@ -39,6 +39,13 @@ const DESKTOP_UNIT_NAMES = [
 const RESTART_READY_TIMEOUT_MS = 120_000;
 const RESTART_POLL_INTERVAL_MS = 3_000;
 
+// systemctl is-active exits 4 when a unit is inactive, and the SSH runner
+// treats a non-zero exit as a failure — so every probe appends `|| true` to
+// make the states readable data rather than an error.
+const IS_ACTIVE =
+  "systemctl is-active syntrum-xvfb.service syntrum-desktop.service " +
+  "syntrum-vnc.service syntrum-novnc.service";
+
 // Everything needed to explain a failure in one run instead of the next one.
 async function collectDiagnostics(
   id: string,
@@ -117,10 +124,9 @@ async function main(): Promise<void> {
     // create() already ran verifyDesktop; re-check independently so this proof
     // does not depend on the code under test being correct.
     const units = await guest(computerId, [
-      "systemctl", "is-active", "syntrum-xvfb.service", "syntrum-desktop.service",
-      "syntrum-vnc.service", "syntrum-novnc.service"
+      "sh", "-c", `${IS_ACTIVE} || true`
     ]);
-    evidence.units = units.split(/\s+/);
+    evidence.units = units.trim().split(/\s+/);
     if (evidence.units instanceof Array && evidence.units.some(s => s !== "active")) {
       throw new Error(`Not all desktop units are active: ${units}`);
     }
@@ -172,10 +178,10 @@ async function main(): Promise<void> {
     const restartStartedAt = Date.now();
     let afterRestart = "";
     for (;;) {
-      afterRestart = await guest(computerId, [
-        "systemctl", "is-active", "syntrum-xvfb.service", "syntrum-desktop.service",
-        "syntrum-vnc.service", "syntrum-novnc.service"
-      ]);
+      // `|| true` because systemctl is-active exits 4 when a unit is inactive,
+      // and a non-zero exit is an error to the SSH runner — which would throw
+      // here instead of returning the states the poll needs to inspect.
+      afterRestart = await guest(computerId, ["sh", "-c", `${IS_ACTIVE} || true`]);
       const states = afterRestart.trim().split(/\s+/);
       if (states.length === DESKTOP_UNIT_NAMES.length &&
           states.every(state => state === "active")) {
