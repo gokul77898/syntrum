@@ -148,7 +148,8 @@ export function createBrowserUi({
   // event rather than through the request router.
   server.on("upgrade", (req, socket, head) => {
     const gateway = ctx.gateway;
-    const match = /^\/desktop\/([^/]+)\/websockify$/.exec(
+    // {0,2} so a doubled slash still resolves; see the asset route below.
+    const match = /^\/desktop\/([^/]+)\/{0,2}websockify$/.exec(
       new URL(req.url ?? "/", "http://localhost").pathname
     );
     if (!gateway || !match) {
@@ -273,7 +274,11 @@ async function route(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promi
   // noVNC's own files, fetched from the guest's installed copy and served
   // same-origin so the session cookie authorizes them. Nothing third-party is
   // vendored here, and the path is a path — never a URL.
-  const asset = path.match(/^\/desktop\/([^/]+)\/(.+)$/);
+  //
+  // A leading slash is tolerated before the computer id: a client that builds
+  // the socket URL from a path segment ending in "/" can produce "//desktop",
+  // and refusing that would break the connection for no security benefit.
+  const asset = path.match(/^\/desktop\/([^/]+)\/{0,2}(.+)$/);
   if (asset && method === "GET") {
     if (!ctx.gateway) {
       sendJson(res, 503, {
@@ -345,11 +350,16 @@ async function replyDesktop(res: ServerResponse, id: string, ctx: Ctx): Promise<
   // the socket URL is the gateway's own path. Nothing here names the worker,
   // its address, or the container IP — those stay on this side of the gate.
   if (status === "running" && desktopEnabled) {
+    // noVNC treats `path` as a *relative* segment and prepends its own "/"
+    // (app/ui.js does `url += '/' + path`). A leading slash here therefore
+    // builds "//desktop/..." and the upgrade 404s, which surfaces in the
+    // browser as "Failed to connect to server".
+    const socketPath = `desktop/${encodeURIComponent(id)}/websockify`;
     sendJson(res, 200, {
       available: true,
       gateway: "noVNC over SSH stream",
       path: `/desktop/${encodeURIComponent(id)}/vnc.html`,
-      socketPath: `/desktop/${encodeURIComponent(id)}/websockify`,
+      socketPath,
       reason: undefined,
       computer: {
         id: computer.id,
