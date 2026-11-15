@@ -73,11 +73,11 @@ struct GUIInput {
             exit(2)
         }
 
-        guard app.activate(options: [.activateIgnoringOtherApps]) else {
+        guard app.activate() else {
             fputs("Could not activate PID \(pid)\n", stderr)
             exit(1)
         }
-        try? await Task.sleep(for: .milliseconds(500))
+        try? await Task.sleep(for: .milliseconds(750))
 
         switch args[0] {
         case "click":
