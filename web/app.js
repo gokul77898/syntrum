@@ -324,6 +324,18 @@ document.addEventListener("click", event => {
   if (action === "refresh") loadFleet();
   if (action === "create") openCreate();
   if (action === "refresh-desktop" && state.selectedId) loadDesktop(state.selectedId);
+  if (action === "desktop-fullscreen") {
+    const stage = document.getElementById("desktop-stage");
+    // The Fullscreen API needs the element, not the iframe's document; a
+    // rejection is normal when the browser blocks it outside a user gesture.
+    stage?.requestFullscreen?.().catch(() => undefined);
+  }
+  if (action === "desktop-reconnect") {
+    // Reloading the iframe re-runs noVNC's own reconnect path, which is more
+    // reliable than reaching into its object graph across the frame boundary.
+    const frame = document.getElementById("desktop-frame");
+    if (frame) frame.src = frame.src;
+  }
   if (action === "logout") {
     api("/api/logout", { method: "POST" })
       .catch(() => undefined)

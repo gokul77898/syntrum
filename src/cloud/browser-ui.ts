@@ -8,6 +8,8 @@ import {
 } from "node:http";
 import { join } from "node:path";
 
+import { DesktopGateway } from "./desktop-gateway.js";
+
 /**
  * Browser surface for SYNTRUM.
  *
@@ -51,6 +53,10 @@ export type BrowserUiOptions = {
   operatorToken: string;
   /** Directory containing index.html, app.css, app.js, icons.js, views.js */
   webRoot: string;
+  /** SSH destination of the worker that hosts the guests, e.g. gokul@10.0.0.5 */
+  workerHost?: string;
+  workerKnownHostsPath?: string;
+  workerIdentityFile?: string;
 };
 
 type Ctx = {
@@ -58,20 +64,74 @@ type Ctx = {
   operatorToken: string;
   webRoot: string;
   sessions: Map<string, Session>;
+  gateway?: DesktopGateway;
 };
 
-export function createBrowserUi({ cloudBaseUrl, operatorToken, webRoot }: BrowserUiOptions): Server {
+export function createBrowserUi({
+  cloudBaseUrl,
+  operatorToken,
+  webRoot,
+  workerHost,
+  workerKnownHostsPath,
+  workerIdentityFile
+}: BrowserUiOptions): Server {
   if (operatorToken.length < 32) {
     throw new TypeError("Operator token must contain at least 32 characters");
   }
+  const base = cloudBaseUrl.replace(/\/+$/, "");
   const ctx: Ctx = {
-    base: cloudBaseUrl.replace(/\/+$/, ""),
+    base,
     operatorToken,
     webRoot,
     sessions: new Map()
   };
 
-  return createServer((req, res) => {
+  if (workerHost) {
+    const separator = workerHost.lastIndexOf("@");
+    if (separator <= 0) {
+      throw new TypeError("workerHost must be in user@host form");
+    }
+    const ssh = {
+      user: workerHost.slice(0, separator),
+      host: workerHost.slice(separator + 1),
+      knownHostsPath: workerKnownHostsPath,
+      identityFile: workerIdentityFile
+    };
+    ctx.gateway = new DesktopGateway({
+      ssh,
+      // The authenticated session is the authorization: authorize() below is
+      // the same check every other API route uses.
+      authorize: (req: IncomingMessage) => authorize(req, ctx.sessions) !== null,
+      // Resolved from the control plane, never from the request. details()
+      // reports the instance's real addresses, so the browser cannot name a
+      // host: an unaddressable computer fails here instead of being dialled.
+      resolveTarget: async (id: string) => {
+        const response = await fetch(
+          `${base}/computers/${encodeURIComponent(id)}/details`,
+          {
+            headers: { authorization: `Bearer ${operatorToken}` },
+            signal: AbortSignal.timeout(6000)
+          }
+        );
+        if (!response.ok) {
+          throw new Error(`Control plane returned ${response.status}`);
+        }
+        const payload = await response.json() as {
+          details?: { ipAddresses?: string[] };
+          computer?: { desktopPort?: number };
+        };
+        const host = payload.details?.ipAddresses?.find(address => !address.includes(":"));
+        const port = payload.computer?.desktopPort ??
+          (await desktopPort(base, operatorToken, id));
+        if (!host || !port) {
+          throw new Error("The desktop has no reachable address yet");
+        }
+        return { host, port };
+      }
+    });
+  }
+
+  const server = createServer((req, res) => {
     void route(req, res, ctx).catch(error => {
       if (!res.headersSent) {
         sendJson(res, 500, {
@@ -83,6 +143,41 @@ export function createBrowserUi({ cloudBaseUrl, operatorToken, webRoot }: Browse
       }
     });
   });
+
+  // The desktop stream is a raw TCP bridge, so it is handled at the upgrade
+  // event rather than through the request router.
+  server.on("upgrade", (req, socket, head) => {
+    const gateway = ctx.gateway;
+    const match = /^\/desktop\/([^/]+)\/websockify$/.exec(
+      new URL(req.url ?? "/", "http://localhost").pathname
+    );
+    if (!gateway || !match) {
+      socket.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    void gateway
+      .handleUpgrade(req, socket, head as Buffer, decodeURIComponent(match[1]))
+      .catch(() => socket.destroy());
+  });
+
+  return server;
+}
+
+// The desktop port is part of the computer record; details() does not repeat
+// it, so it is read from the same control-plane object the UI already uses.
+async function desktopPort(
+  base: string,
+  operatorToken: string,
+  id: string
+): Promise<number | undefined> {
+  const response = await fetch(`${base}/computers/${encodeURIComponent(id)}`, {
+    headers: { authorization: `Bearer ${operatorToken}` },
+    signal: AbortSignal.timeout(4000)
+  });
+  if (!response.ok) return undefined;
+  const payload = await response.json() as { computer?: { desktopPort?: number } };
+  return payload.computer?.desktopPort;
 }
 
 async function route(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
@@ -175,6 +270,27 @@ async function route(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promi
     return;
   }
 
+  // noVNC's own files, fetched from the guest's installed copy and served
+  // same-origin so the session cookie authorizes them. Nothing third-party is
+  // vendored here, and the path is a path — never a URL.
+  const asset = path.match(/^\/desktop\/([^/]+)\/(.+)$/);
+  if (asset && method === "GET") {
+    if (!ctx.gateway) {
+      sendJson(res, 503, {
+        error: "The desktop gateway is not configured on this server.",
+        code: "GATEWAY_DISABLED"
+      });
+      return;
+    }
+    await ctx.gateway.proxyAsset(
+      req,
+      res,
+      decodeURIComponent(asset[1]),
+      `/${asset[2]}`
+    );
+    return;
+  }
+
   const forward = toControlPlanePath(path);
   if (forward) {
     await proxy(req, res, `${ctx.base}${forward}${url.search}`, method, ctx.operatorToken);
@@ -225,18 +341,36 @@ async function replyDesktop(res: ServerResponse, id: string, ctx: Ctx): Promise<
   const status = String(computer.status);
   const desktopEnabled = computer.desktopEnabled === true;
 
-  let reason: string;
-  if (status !== "running") {
-    reason = `Desktop unavailable: this computer is ${status}. Start it to attach a screen.`;
-  } else if (!desktopEnabled) {
-    reason = "This computer was provisioned without a desktop environment.";
-  } else {
-    reason = "The guest desktop is provisioned, but the authenticated noVNC gateway is not implemented yet. The viewport stays empty rather than showing a simulated screen.";
+  // The real entry point: the browser loads noVNC from the guest itself, and
+  // the socket URL is the gateway's own path. Nothing here names the worker,
+  // its address, or the container IP — those stay on this side of the gate.
+  if (status === "running" && desktopEnabled) {
+    sendJson(res, 200, {
+      available: true,
+      gateway: "noVNC over SSH stream",
+      path: `/desktop/${encodeURIComponent(id)}/vnc.html`,
+      socketPath: `/desktop/${encodeURIComponent(id)}/websockify`,
+      reason: undefined,
+      computer: {
+        id: computer.id,
+        status,
+        desktopEnabled,
+        cpu: computer.cpu,
+        memoryMb: computer.memoryMb,
+        diskGb: computer.diskGb,
+        createdAt: computer.createdAt
+      }
+    });
+    return;
   }
+
+  const reason = status !== "running"
+    ? `Desktop unavailable: this computer is ${status}. Start it to attach a screen.`
+    : "This computer was provisioned without a desktop environment.";
 
   sendJson(res, 200, {
     available: false,
-    gateway: "not_implemented",
+    gateway: "none",
     reason,
     computer: {
       id: computer.id,
@@ -246,12 +380,7 @@ async function replyDesktop(res: ServerResponse, id: string, ctx: Ctx): Promise<
       memoryMb: computer.memoryMb,
       diskGb: computer.diskGb,
       createdAt: computer.createdAt
-    },
-    required: [
-      "HTTPS/WebSocket gateway bound to loopback",
-      "Short-lived, computer-scoped desktop tokens",
-      "Session-scoped XFCE display with x11vnc in the guest"
-    ]
+    }
   });
 }
 

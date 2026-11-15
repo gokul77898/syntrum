@@ -241,28 +241,39 @@ export function workspace({ computer, desktop, loading, error }) {
   const ready = status === "running";
 
   const viewport = d.available
-    ? `<div class="viewport__stage" id="desktop-stage"></div>`
+    ? `<div class="viewport__stage" id="desktop-stage">
+        <iframe
+          id="desktop-frame"
+          class="desktop-frame"
+          title="Cloud computer desktop"
+          src="${esc(d.path)}?path=${encodeURIComponent(d.socketPath)}&resize=remote&autoconnect=1&reconnect=1&reconnect_delay=2000&view_only=0&show_dot=0"
+          allow="clipboard-read; clipboard-write"
+        ></iframe>
+      </div>`
     : `<div class="viewport__state">
         <div class="viewport__badge">${icon("plug")} Desktop not attached</div>
-        <h2 class="viewport__title">${ready ? "Gateway not implemented" : `Computer ${esc(status)}`}</h2>
+        <h2 class="viewport__title">${ready ? "No desktop session" : `Computer ${esc(status)}`}</h2>
         <p class="viewport__text">${esc(d.reason ?? "No desktop session is available for this computer.")}</p>
-        ${Array.isArray(d.required) && d.required.length ? `
-          <ul class="viewport__reqs">
-            ${d.required.map(item => `<li>${icon("check")}<span>${esc(item)}</span></li>`).join("")}
-          </ul>` : ""}
       </div>`;
 
-  return `<div class="workspace">
+  return `<div class="workspace${d.available ? " workspace--attached" : ""}">
     <div class="workspace__main">
       <div class="viewport__chrome">
         <span class="status status--${esc(status)}"><span class="status__dot"></span>${esc(status)}</span>
         <span class="pill">${esc(shortId(computer.id))}</span>
         <span class="spacer"></span>
-        ${ready
-          ? `<button class="btn btn--sm" disabled>${icon("plug")} ${d.available ? "Attach" : "Attach unavailable"}</button>`
-          : `<button class="btn btn--sm" data-op="start" data-id="${esc(computer.id)}">${icon("play")} Start</button>`}
+        ${d.available ? `
+          <button class="btn btn--sm btn--ghost" data-action="desktop-fullscreen">
+            ${icon("workspace")} Full screen
+          </button>
+          <button class="btn btn--sm btn--ghost" data-action="desktop-reconnect">
+            ${icon("refresh")} Reconnect
+          </button>` : ""}
+        ${!ready
+          ? `<button class="btn btn--sm" data-op="start" data-id="${esc(computer.id)}">${icon("play")} Start</button>`
+          : ""}
         <button class="btn btn--sm btn--ghost" data-action="refresh-desktop" ${!ready ? "disabled" : ""}>
-          ${icon("refresh")} Retry
+          ${icon("refresh")} Refresh
         </button>
       </div>
       <div class="viewport">${viewport}</div>
@@ -294,8 +305,8 @@ export function workspace({ computer, desktop, loading, error }) {
       <div class="side__section">
         <div class="side__head"><span class="side__title">Connection</span></div>
         <div class="kv">
-          <div class="kv__row"><span class="kv__k">Transport</span><span class="kv__v">${esc(d.gateway === "not_implemented" ? "none" : d.gateway ?? "none")}</span></div>
-          <div class="kv__row"><span class="kv__k">Viewers</span><span class="kv__v">${d.available ? "—" : "0"}</span></div>
+          <div class="kv__row"><span class="kv__k">Transport</span><span class="kv__v">${esc(d.gateway ?? "none")}</span></div>
+          <div class="kv__row"><span class="kv__k">Viewers</span><span class="kv__v">${d.available ? "1" : "0"}</span></div>
           <div class="kv__row"><span class="kv__k">Session</span><span class="kv__v">${d.available ? "attached" : "detached"}</span></div>
         </div>
       </div>
