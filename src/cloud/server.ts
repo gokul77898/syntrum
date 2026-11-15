@@ -1,4 +1,3 @@
-import { timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,6 +6,13 @@ import { GpuScheduler } from "../gpu/scheduler.js";
 import { NvidiaWorkerAgent } from "../gpu/nvidia-worker-agent.js";
 import { GpuStore } from "../gpu/store.js";
 import { GpuError, type GpuAllocationRequest } from "../gpu/types.js";
+import {
+  AccountStore,
+  OPERATOR,
+  bearerToken,
+  tokenMatches,
+  type Caller
+} from "./accounts.js";
 import { IncusWorkerDriver } from "./incus-driver.js";
 import { CloudComputerService } from "./service.js";
 import { createSshCommandRunner } from "./ssh-command-runner.js";
@@ -21,6 +27,8 @@ export type CloudHttpOptions = {
   operatorToken: string;
   gpuScheduler?: GpuScheduler;
   workerStore?: WorkerStore;
+  /** Omitted disables account tokens; the operator token still works. */
+  accountStore?: AccountStore;
 };
 
 export function createCloudHttpServer(options: CloudHttpOptions): Server {
@@ -55,7 +63,46 @@ async function handle(
     respond(res, 200, { status: "healthy", service: "SYNTRUM cloud control plane" });
     return;
   }
-  authenticate(req, options.operatorToken);
+  const caller = authenticate(req, options);
+
+  // Account administration is the operator's alone: an account must not be
+  // able to mint tokens, raise its own limit, or enumerate other tenants.
+  if (pathname === "/accounts" && options.accountStore) {
+    requireOperator(caller);
+    if (method === "GET") {
+      respond(res, 200, { accounts: options.accountStore.list() });
+      return;
+    }
+    if (method === "POST") {
+      const body = await readJson(req);
+      const created = options.accountStore.create(
+        String(body.name ?? ""),
+        body.maxComputers === undefined ? undefined : Number(body.maxComputers)
+      );
+      // The token is returned exactly once, here. Only its hash is stored.
+      respond(res, 201, { account: created.account, token: created.token });
+      return;
+    }
+  }
+  const accountMatch = pathname.match(/^\/accounts\/([^/]+)(?:\/(token|status))?$/);
+  if (accountMatch && options.accountStore) {
+    requireOperator(caller);
+    const [, accountId, operation] = accountMatch;
+    if (operation === "token" && method === "POST") {
+      respond(res, 200, { token: options.accountStore.rotateToken(accountId) });
+      return;
+    }
+    if (operation === "status" && method === "POST") {
+      const body = await readJson(req);
+      const status = body.status === "disabled" ? "disabled" : "active";
+      respond(res, 200, { account: options.accountStore.setStatus(accountId, status) });
+      return;
+    }
+    if (!operation && method === "GET") {
+      respond(res, 200, { account: options.accountStore.get(accountId) });
+      return;
+    }
+  }
 
   if (pathname === "/gpus" && method === "GET" && options.gpuScheduler) {
     respond(res, 200, { gpus: await options.gpuScheduler.refreshInventory() });
@@ -64,20 +111,35 @@ async function handle(
   if (pathname === "/gpu/allocations" && options.gpuScheduler) {
     if (method === "GET") {
       const activeOnly = new URL(req.url ?? "/", "http://localhost").searchParams.get("active") === "1";
-      respond(res, 200, { allocations: options.gpuScheduler.listAllocations(activeOnly) });
+      const allocations = options.gpuScheduler.listAllocations(activeOnly);
+      respond(res, 200, { allocations: visibleAllocations(allocations, caller, options) });
       return;
     }
     if (method === "POST") {
       const body = await readJson(req);
-      respond(res, 201, {
-        allocation: await options.gpuScheduler.allocate(body as GpuAllocationRequest)
-      });
+      const request = body as GpuAllocationRequest;
+      // A GPU allocation is attached to a computer, so access follows the
+      // computer's owner rather than anything in the request body.
+      if (request.computerId) {
+        options.service.get(request.computerId, caller);
+      }
+      respond(res, 201, { allocation: await options.gpuScheduler.allocate(request) });
       return;
     }
   }
   if (pathname === "/gpu/metrics" && method === "GET" && options.gpuScheduler) {
     const allocationId = new URL(req.url ?? "/", "http://localhost").searchParams.get("allocationId") ?? undefined;
-    respond(res, 200, { metrics: options.gpuScheduler.listMetrics(allocationId) });
+    const metrics = options.gpuScheduler.listMetrics(allocationId);
+    const visible = new Set(
+      visibleAllocations(options.gpuScheduler.listAllocations(), caller, options).map(item => item.id)
+    );
+    // A metric with no allocation belongs to no account, so it is filtered out
+    // for anyone but the operator rather than being attributed to a tenant.
+    respond(res, 200, {
+      metrics: metrics.filter(metric =>
+        metric.allocationId !== undefined && visible.has(metric.allocationId)
+      )
+    });
     return;
   }
 
@@ -88,12 +150,12 @@ async function handle(
 
   if (pathname === "/computers") {
     if (method === "GET") {
-      respond(res, 200, { computers: options.service.list() });
+      respond(res, 200, { computers: options.service.list(caller) });
       return;
     }
     if (method === "POST") {
       const body = await readJson(req);
-      respond(res, 201, { computer: await options.service.create(body) });
+      respond(res, 201, { computer: await options.service.create(body, caller) });
       return;
     }
   }
@@ -102,38 +164,43 @@ async function handle(
   if (match) {
     const [, id, operation] = match;
     if (operation === "access" && method === "GET") {
-      respond(res, 200, options.service.access(id));
+      respond(res, 200, options.service.access(id, caller));
       return;
     }
     if (operation === "details" && method === "GET") {
-      respond(res, 200, { details: await options.service.details(id) });
+      respond(res, 200, { details: await options.service.details(id, caller) });
       return;
     }
     if (operation === "exec" && method === "POST") {
       const body = await readJson(req);
       respond(res, 200, {
-        output: await options.service.execute(id, body.args as string[], body.timeoutMs as number | undefined)
+        output: await options.service.execute(
+          id,
+          body.args as string[],
+          body.timeoutMs as number | undefined,
+          caller
+        )
       });
       return;
     }
     if (!operation && method === "GET") {
-      respond(res, 200, { computer: options.service.get(id) });
+      respond(res, 200, { computer: options.service.get(id, caller) });
       return;
     }
     if (!operation && method === "DELETE") {
-      respond(res, 200, { computer: await options.service.destroy(id) });
+      respond(res, 200, { computer: await options.service.destroy(id, caller) });
       return;
     }
     if (operation === "start" && method === "POST") {
-      respond(res, 200, { computer: await options.service.start(id) });
+      respond(res, 200, { computer: await options.service.start(id, caller) });
       return;
     }
     if (operation === "stop" && method === "POST") {
-      respond(res, 200, { computer: await options.service.stop(id) });
+      respond(res, 200, { computer: await options.service.stop(id, caller) });
       return;
     }
     if (operation === "restart" && method === "POST") {
-      respond(res, 200, { computer: await options.service.restart(id) });
+      respond(res, 200, { computer: await options.service.restart(id, caller) });
       return;
     }
   }
@@ -141,12 +208,49 @@ async function handle(
   throw new CloudError(404, "ROUTE_NOT_FOUND", "Route not found");
 }
 
-function authenticate(req: IncomingMessage, expectedToken: string): void {
-  const expected = Buffer.from(`Bearer ${expectedToken}`);
-  const actual = Buffer.from(req.headers.authorization ?? "");
-  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
-    throw new CloudError(401, "UNAUTHORIZED", "Valid operator bearer token required");
+/** An account sees only allocations on computers it owns. */
+function visibleAllocations<T extends { computerId: string }>(
+  allocations: T[],
+  caller: Caller,
+  options: CloudHttpOptions
+): T[] {
+  if (caller.kind === "operator") return allocations;
+  return allocations.filter(allocation => {
+    try {
+      options.service.get(allocation.computerId, caller);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function requireOperator(caller: Caller): void {
+  if (caller.kind !== "operator") {
+    throw new CloudError(403, "OPERATOR_REQUIRED", "Operator credential required");
   }
+}
+
+/**
+ * The operator token wins outright; otherwise the token is looked up as an
+ * account. A disabled account is refused even with a valid token.
+ */
+export function authenticate(req: IncomingMessage, options: CloudHttpOptions): Caller {
+  const token = bearerToken(req);
+  if (token.length === 0) {
+    throw new CloudError(401, "UNAUTHORIZED", "Valid bearer token required");
+  }
+  if (tokenMatches(token, options.operatorToken)) {
+    return OPERATOR;
+  }
+  const account = options.accountStore?.findByToken(token);
+  if (!account) {
+    throw new CloudError(401, "UNAUTHORIZED", "Valid bearer token required");
+  }
+  if (account.status !== "active") {
+    throw new CloudError(403, "ACCOUNT_DISABLED", "This account is disabled");
+  }
+  return { kind: "account", account };
 }
 
 async function readJson(req: IncomingMessage): Promise<Record<string, unknown>> {
@@ -227,6 +331,7 @@ async function main(): Promise<void> {
     service,
     gpuScheduler,
     workerStore,
+    accountStore: new AccountStore(databasePath),
     operatorToken: requiredEnvironment("CLOUD_AI_OS_OPERATOR_TOKEN")
   });
   server.listen(4318, "127.0.0.1", () => {

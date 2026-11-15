@@ -14,8 +14,9 @@ export class CloudComputerStore {
     this.database.prepare(`
       INSERT INTO cloud_computers (
         id, worker_host, image, cpu, memory_mb, disk_gb, storage_volume,
-        desktop_port, desktop_enabled, status, error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        desktop_port, desktop_enabled, status, error, created_at, updated_at,
+        owner_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       computer.id,
       computer.workerHost,
@@ -29,7 +30,8 @@ export class CloudComputerStore {
       computer.status,
       computer.error ?? null,
       computer.createdAt,
-      computer.updatedAt
+      computer.updatedAt,
+      computer.ownerId ?? null
     );
   }
 
@@ -43,12 +45,30 @@ export class CloudComputerStore {
     return this.fromRow(row);
   }
 
-  list(includeDeleted = false): CloudComputer[] {
+  /**
+   * `ownerId` of undefined means every computer, which is the operator's view.
+   * A string scopes to that account; null scopes to the unowned rows, which
+   * only the operator can ask for.
+   */
+  list(options: { ownerId?: string | null; includeDeleted?: boolean } = {}): CloudComputer[] {
+    const where: string[] = [];
+    const values: (string | null)[] = [];
+    if (!options.includeDeleted) {
+      where.push("status <> 'deleted'");
+    }
+    if (options.ownerId !== undefined) {
+      if (options.ownerId === null) {
+        where.push("owner_id IS NULL");
+      } else {
+        where.push("owner_id = ?");
+        values.push(options.ownerId);
+      }
+    }
     const rows = this.database.prepare(`
       SELECT * FROM cloud_computers
-      ${includeDeleted ? "" : "WHERE status <> 'deleted'"}
+      ${where.length > 0 ? `WHERE ${where.join(" AND ")}` : ""}
       ORDER BY created_at ASC, id ASC
-    `).all() as Record<string, unknown>[];
+    `).all(...values) as Record<string, unknown>[];
     return rows.map(row => this.fromRow(row));
   }
 
@@ -86,6 +106,7 @@ export class CloudComputerStore {
       desktopPort: row.desktop_port as number,
       desktopEnabled: row.desktop_enabled !== 0,
       status: row.status as CloudComputerStatus,
+      ...(row.owner_id ? { ownerId: row.owner_id as string } : {}),
       ...(row.error ? { error: row.error as string } : {}),
       createdAt: row.created_at as string,
       updatedAt: row.updated_at as string

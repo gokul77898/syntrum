@@ -20,6 +20,8 @@ export type CloudComputer = {
   desktopPort: number;
   desktopEnabled: boolean;
   status: CloudComputerStatus;
+  /** Absent for computers created before accounts existed. */
+  ownerId?: string;
   error?: string;
   createdAt: string;
   updatedAt: string;

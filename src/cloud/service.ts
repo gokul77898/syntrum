@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { OPERATOR, ownsComputer, type Caller } from "./accounts.js";
 import { CloudComputerStore } from "./store.js";
 import {
   CloudError,
@@ -20,6 +21,8 @@ export type CloudComputerServiceOptions = {
   driver: WorkerDriver;
   workerHost: string;
   desktopEnabled?: boolean;
+  /** Per-account ceiling; undefined uses each account's own maxComputers. */
+  accountComputerLimit?: number;
 };
 
 export class CloudComputerService {
@@ -27,6 +30,7 @@ export class CloudComputerService {
   private readonly driver: WorkerDriver;
   private readonly workerHost: string;
   private readonly desktopEnabled: boolean;
+  private readonly accountComputerLimit?: number;
   private readonly operations = new Map<string, Promise<unknown>>();
 
   constructor(options: CloudComputerServiceOptions) {
@@ -34,18 +38,25 @@ export class CloudComputerService {
     this.driver = options.driver;
     this.workerHost = options.workerHost;
     this.desktopEnabled = options.desktopEnabled !== false;
+    this.accountComputerLimit = options.accountComputerLimit;
   }
 
-  list(): CloudComputer[] {
-    return this.store.list();
+  /**
+   * Without a caller this is the operator's own view, which is what every
+   * pre-accounts caller (acceptance harnesses, tests) means.
+   */
+  list(caller: Caller = OPERATOR): CloudComputer[] {
+    return this.store.list(
+      caller.kind === "operator" ? {} : { ownerId: caller.account.id }
+    );
   }
 
-  get(id: string): CloudComputer {
+  get(id: string, caller: Caller = OPERATOR): CloudComputer {
     this.validateId(id);
-    return this.requireActive(id);
+    return this.requireAccess(id, caller);
   }
 
-  async create(input: CreateComputerInput = {}): Promise<CloudComputer> {
+  async create(input: CreateComputerInput = {}, caller: Caller = OPERATOR): Promise<CloudComputer> {
     const id = randomUUID();
     const cpu = input.cpu ?? DEFAULT_CPU;
     const memoryMb = input.memoryMb ?? DEFAULT_MEMORY_MB;
@@ -58,6 +69,19 @@ export class CloudComputerService {
     }
     if (!Number.isSafeInteger(diskGb) || diskGb < 5 || diskGb > 2048) {
       throw new CloudError(400, "INVALID_DISK", "Disk must be between 5 and 2048 GiB");
+    }
+
+    // The limit comes from the account record, never from the request, so a
+    // caller cannot raise their own ceiling.
+    if (caller.kind === "account") {
+      if (caller.account.status !== "active") {
+        throw new CloudError(403, "ACCOUNT_DISABLED", "This account is disabled");
+      }
+      const limit = this.accountComputerLimit ?? caller.account.maxComputers;
+      const existing = this.store.list({ ownerId: caller.account.id }).length;
+      if (existing >= limit) {
+        throw new CloudError(429, "COMPUTER_LIMIT_REACHED", `Account limit of ${limit} computers reached`);
+      }
     }
 
     const now = new Date().toISOString();
@@ -76,6 +100,7 @@ export class CloudComputerService {
     this.store.insert({
       ...spec,
       desktopEnabled,
+      ...(caller.kind === "account" ? { ownerId: caller.account.id } : {}),
       status: "provisioning",
       createdAt: now,
       updatedAt: now
@@ -96,22 +121,24 @@ export class CloudComputerService {
     });
   }
 
-  start(id: string): Promise<CloudComputer> {
-    return this.transition(id, "starting", () => this.driver.start(id), "running");
+  start(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
+    return this.transition(id, "starting", () => this.driver.start(id), "running", caller);
   }
 
-  stop(id: string): Promise<CloudComputer> {
-    return this.transition(id, "stopping", () => this.driver.stop(id), "stopped");
+  stop(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
+    return this.transition(id, "stopping", () => this.driver.stop(id), "stopped", caller);
   }
 
-  restart(id: string): Promise<CloudComputer> {
-    return this.transition(id, "restarting", () => this.driver.restart(id), "running");
+  restart(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
+    return this.transition(id, "restarting", () => this.driver.restart(id), "running", caller);
   }
 
-  destroy(id: string): Promise<CloudComputer> {
+  destroy(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
     this.validateId(id);
     return this.runExclusive(id, async () => {
-      const computer = this.store.get(id);
+      // Checked inside the exclusive section so a deleted-then-read race cannot
+      // reveal another account's record.
+      const computer = this.requireAccess(id, caller);
       if (computer.status === "deleted") {
         return computer;
       }
@@ -126,18 +153,20 @@ export class CloudComputerService {
     });
   }
 
-  details(id: string) {
+  details(id: string, caller: Caller = OPERATOR) {
     this.validateId(id);
+    // Ownership first: answering "details not supported" to a non-owner would
+    // confirm the ID exists, which the 404 below is meant to hide.
+    this.requireAccess(id, caller);
     if (!this.driver.inspectDetails) {
       throw new CloudError(501, "DETAILS_NOT_SUPPORTED", "Worker does not expose resource details");
     }
-    this.requireActive(id);
     return this.driver.inspectDetails(id);
   }
 
-  execute(id: string, args: readonly string[], timeoutMs?: number): Promise<string> {
+  execute(id: string, args: readonly string[], timeoutMs?: number, caller: Caller = OPERATOR): Promise<string> {
     this.validateId(id);
-    if (this.requireActive(id).status !== "running") {
+    if (this.requireAccess(id, caller).status !== "running") {
       throw new CloudError(409, "COMPUTER_NOT_RUNNING", "Cloud computer must be running");
     }
     if (!this.driver.execute) {
@@ -153,8 +182,8 @@ export class CloudComputerService {
     return this.driver.execute(id, args, timeoutMs);
   }
 
-  access(id: string) {
-    const computer = this.requireActive(id);
+  access(id: string, caller: Caller = OPERATOR) {
+    const computer = this.requireAccess(id, caller);
     if (computer.status !== "running") {
       throw new CloudError(409, "DESKTOP_NOT_READY", "Cloud desktop is not running");
     }
@@ -191,11 +220,12 @@ export class CloudComputerService {
     id: string,
     pending: CloudComputer["status"],
     operation: () => Promise<void>,
-    completed: CloudComputer["status"]
+    completed: CloudComputer["status"],
+    caller: Caller = OPERATOR
   ): Promise<CloudComputer> {
     this.validateId(id);
     return this.runExclusive(id, async () => {
-      this.requireActive(id);
+      this.requireAccess(id, caller);
       this.store.updateStatus(id, pending);
       try {
         await operation();
@@ -219,8 +249,17 @@ export class CloudComputerService {
     return result;
   }
 
-  private requireActive(id: string): CloudComputer {
+  /**
+   * Another account's computer is reported as missing rather than forbidden, so
+   * a caller cannot use the difference to learn which IDs exist. Only after
+   * ownership passes does a deleted computer report as deleted, which the owner
+   * is entitled to know.
+   */
+  private requireAccess(id: string, caller: Caller = OPERATOR): CloudComputer {
     const computer = this.store.get(id);
+    if (!ownsComputer(caller, computer.ownerId ?? null)) {
+      throw new CloudError(404, "COMPUTER_NOT_FOUND", "Cloud computer not found");
+    }
     if (computer.status === "deleted") {
       throw new CloudError(409, "COMPUTER_DELETED", "Cloud computer has been deleted");
     }

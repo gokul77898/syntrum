@@ -5,6 +5,16 @@ export {
   resolveNodePlatform
 } from "./guest-provisioner.js";
 export { CloudComputerService } from "./service.js";
+export {
+  AccountStore,
+  OPERATOR,
+  ownsComputer,
+  hashToken,
+  newAccountToken,
+  tokenMatches,
+  bearerToken
+} from "./accounts.js";
+export type { Account, Caller } from "./accounts.js";
 export { createBrowserUi } from "./browser-ui.js";
 export { DesktopGateway } from "./desktop-gateway.js";
 export { createSshCommandRunner } from "./ssh-command-runner.js";

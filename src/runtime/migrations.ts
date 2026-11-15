@@ -190,4 +190,32 @@ export const migrations: Migration[] = [
       );
     `
   },
+  {
+    version: 7,
+    name: "accounts_and_computer_ownership",
+    sql: `
+      CREATE TABLE accounts (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        -- SHA-256 of the token, never the token itself. Tokens are 32 random
+        -- bytes, so there is no low-entropy guess to slow down; a password
+        -- would need scrypt instead.
+        token_hash TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+        -- Per-account ceiling so one tenant cannot fill the shared pool.
+        max_computers INTEGER NOT NULL CHECK (max_computers > 0),
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX accounts_token_hash ON accounts(token_hash);
+
+      -- Nullable on purpose: rows created before accounts existed belong to
+      -- nobody, so only the operator can see them. Visible-to-all would be the
+      -- unsafe default.
+      ALTER TABLE cloud_computers ADD COLUMN owner_id TEXT REFERENCES accounts(id);
+
+      CREATE INDEX cloud_computers_owner
+        ON cloud_computers(owner_id, created_at);
+    `
+  },
 ];
