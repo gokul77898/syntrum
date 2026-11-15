@@ -72,10 +72,18 @@ async function main(): Promise<void> {
       .catch(error => `(unavailable: ${errorMessage(error, "failed")})`);
 
     // curl and xz are what the install script requires; the base image has
-    // neither, so bootstrap them the way the desktop path does.
+    // neither, so bootstrap them the way the desktop path does. A skewed worker
+    // clock makes apt reject its own Release files as "not valid yet", so the
+    // same opt-in date override is applied here — the same one the driver
+    // passes to cloud-init.
+    const aptConf = process.env.SYNTRUM_WORKER_APT_CONF;
+    const aptOptions = aptConf
+      ? `-o Acquire::Check-Date=false`
+      : "";
     await driver.execute?.(computerId, [
       "sh", "-c",
-      "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl xz-utils"
+      `apt-get ${aptOptions} update -qq && ` +
+      `DEBIAN_FRONTEND=noninteractive apt-get ${aptOptions} install -y -qq curl xz-utils`
     ], 10 * 60_000);
     evidence.bootstrapped = true;
 
