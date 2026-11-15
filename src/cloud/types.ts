@@ -59,6 +59,8 @@ export interface WorkerDriver {
   destroy(spec: Pick<ComputerSpec, "id" | "storageVolume">): Promise<void>;
   inspect(id: string): Promise<CloudComputerStatus>;
   inspectDetails?(id: string): Promise<ComputerDetails>;
+  // Optional because a worker without desktop support has nothing to verify.
+  verifyDesktop?(id: string): Promise<void>;
   execute?(id: string, args: readonly string[], timeoutMs?: number): Promise<string>;
 }
 

@@ -12,7 +12,8 @@ import {
 const DEFAULT_CPU = 2;
 const DEFAULT_MEMORY_MB = 4096;
 const DEFAULT_DISK_GB = 40;
-const DEFAULT_IMAGE = "images:ubuntu/24.04";
+// Must match the driver's image: only the /cloud variant ships cloud-init.
+const DEFAULT_IMAGE = "images:ubuntu/24.04/cloud";
 
 export type CloudComputerServiceOptions = {
   store: CloudComputerStore;
@@ -82,6 +83,11 @@ export class CloudComputerService {
     return this.runExclusive(id, async () => {
       try {
         await this.driver.create(spec);
+        // A requested desktop that never came up must not report "running".
+        // The container is deliberately left in place so it can be inspected.
+        if (desktopEnabled) {
+          await this.driver.verifyDesktop?.(id);
+        }
         return this.store.updateStatus(id, "running");
       } catch (error) {
         this.store.updateStatus(id, "error", this.message(error));

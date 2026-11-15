@@ -196,7 +196,15 @@ async function main(): Promise<void> {
     knownHostsPath: process.env.SYNTRUM_WORKER_SSH_KNOWN_HOSTS,
     identityFile: process.env.SYNTRUM_WORKER_SSH_IDENTITY_FILE
   });
-  const driver = new IncusWorkerDriver(run);
+  // The worker clock is skewed on some deployments, which makes apt reject its
+  // own Release files. This override is opt-in and relaxes only the date check.
+  const aptConf = process.env.SYNTRUM_WORKER_APT_CONF;
+  const driver = new IncusWorkerDriver(
+    run,
+    undefined,
+    undefined,
+    aptConf
+  );
   const workerHost = `${user}@${host}`;
   const databasePath = process.env.CLOUD_AI_OS_DB_PATH ?? resolve(process.cwd(), "data/cloud.sqlite");
   const store = new CloudComputerStore(databasePath);

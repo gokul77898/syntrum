@@ -7,6 +7,7 @@
     "test:live-antigravity": "tsx src/acceptance/live-antigravity.ts",
     "test:live-antigravity-manual": "tsx src/acceptance/manual-antigravity.ts",
     "test:live-incus": "tsx src/acceptance/incus-worker.ts",
+    "test:live-desktop": "tsx src/acceptance/incus-desktop.ts",
     "test:live-vscode": "tsx src/acceptance/live-vscode.ts",
     "test:live-adapter": "CLOUD_AI_OS_LIVE_VSCODE_TEST=1 node --import tsx --test test/dual-head-extension-host.test.ts",
     "benchmark": "tsx src/benchmarks/run.ts",

@@ -6,7 +6,10 @@ import type {
   WorkerDriver
 } from "./types.js";
 
-const DEFAULT_IMAGE = "images:ubuntu/24.04";
+// The /cloud variant is required: it ships cloud-init, which the desktop path
+// depends on. The plain images:ubuntu/24.04 does not, so `cloud-init status`
+// fails with "Command not found" and no desktop is ever provisioned.
+const DEFAULT_IMAGE = "images:ubuntu/24.04/cloud";
 const DEFAULT_STORAGE_POOL = "default";
 const CLOUD_INIT_TIMEOUT_MS = 20 * 60_000;
 
@@ -14,7 +17,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-// Only confirmed absence is idempotent; permission/network/storage failures are not.
+// Restricted Incus projects usually deny proxy devices. The desktop is
+// reachable over the container IP regardless, so a denied proxy is not fatal —
+// but any other failure is.
+const PROXY_FORBIDDEN = /proxy devices are forbidden/i;
+
+// Only confirmed absence is idempotent; permission/network/state failures are not.
 export function isIncusNotFound(error: unknown): boolean {
   const message = errorMessage(error).toLowerCase();
   return message.includes("not found") || message.includes("not exist");
@@ -34,10 +42,27 @@ async function captureFailure(operation: () => Promise<unknown>): Promise<string
 // allocates an unpredictable display.
 const DESKTOP_DISPLAY = ":0";
 
-function desktopCloudInit(): string {
+// Order matters: verifyDesktop maps systemctl output positionally onto this.
+const DESKTOP_UNITS = [
+  "syntrum-xvfb.service",
+  "syntrum-desktop.service",
+  "syntrum-vnc.service",
+  "syntrum-novnc.service"
+] as const;
+
+// aptConf is injected only when the worker clock is known to be skewed. A
+// future-dated clock makes apt reject its own Release files; this relaxes the
+// date check but not signature verification. It is an environment workaround,
+// not a product feature — fix the clock instead.
+//
+// websockify binds 0.0.0.0 inside the guest because the restricted project
+// forbids proxy devices, so the worker reaches it over the container IP rather
+// than a worker-loopback forward. x11vnc stays on guest loopback: only
+// websockify is ever exposed, and only on the container's private bridge.
+function desktopCloudInit(desktopPort: number, aptConf?: string): string {
   return `#cloud-config
 package_update: true
-packages:
+${aptConf ? `apt:\n  conf: |\n${aptConf.split("\n").map(line => `    ${line}`).join("\n")}\n` : ""}packages:
   - xfce4
   - xfce4-session
   - xfce4-terminal
@@ -56,13 +81,9 @@ users:
       - sudo
     shell: /bin/bash
     lock_passwd: true
+# write-files runs before users-groups, so nothing here may be owned by
+# syntrum — a user-owned entry fails silently and aborts every file after it.
 write_files:
-  - path: /home/syntrum/.xinitrc
-    owner: syntrum:syntrum
-    permissions: '0644'
-    content: |
-      #!/bin/sh
-      exec startxfce4
   - path: /etc/systemd/system/syntrum-xvfb.service
     owner: root:root
     permissions: '0644'
@@ -128,7 +149,7 @@ write_files:
 
       [Service]
       Type=simple
-      ExecStart=/usr/bin/websockify --web=/usr/share/novnc 127.0.0.1:6080 127.0.0.1:5900
+      ExecStart=/usr/bin/websockify --web=/usr/share/novnc 0.0.0.0:${desktopPort} 127.0.0.1:5900
       Restart=always
       RestartSec=2
 
@@ -139,7 +160,6 @@ runcmd:
   - systemctl enable --now syntrum-desktop.service
   - systemctl enable --now syntrum-vnc.service
   - systemctl enable --now syntrum-novnc.service
-  - systemctl enable --now dbus.service
 `;
 }
 
@@ -147,7 +167,8 @@ export class IncusWorkerDriver implements WorkerDriver {
   constructor(
     run: CommandRunner,
     private readonly image = DEFAULT_IMAGE,
-    private readonly storagePool = DEFAULT_STORAGE_POOL
+    private readonly storagePool = DEFAULT_STORAGE_POOL,
+    private readonly aptConf?: string
   ) {
     this.run = (args, timeoutMs) => run(["incus", ...args], timeoutMs);
   }
@@ -155,8 +176,10 @@ export class IncusWorkerDriver implements WorkerDriver {
   private readonly run: CommandRunner;
 
   async create(spec: ComputerSpec): Promise<void> {
+    let containerCreated = false;
     try {
-      await this.run(["create", this.image, spec.id], 120_000);
+      await this.run(["create", spec.image ?? this.image, spec.id], 120_000);
+      containerCreated = true;
       await this.run([
         "config", "set", spec.id,
         `limits.cpu=${spec.cpu}`,
@@ -178,13 +201,21 @@ export class IncusWorkerDriver implements WorkerDriver {
       ]);
       if (spec.desktopEnabled !== false) {
         await this.run([
-          "config", "set", spec.id, "cloud-init.user-data", desktopCloudInit()
+          "config", "set", spec.id, "cloud-init.user-data",
+          desktopCloudInit(spec.desktopPort, this.aptConf)
         ]);
-        await this.run([
-          "config", "device", "add", spec.id, "novnc", "proxy",
-          `listen=tcp:127.0.0.1:${spec.desktopPort}`,
-          "connect=tcp:127.0.0.1:6080"
-        ]);
+        // Best-effort: the proxy gives a worker-loopback path, which is the
+        // cleanest one when permitted. A forbidden proxy is expected on a
+        // restricted project and does not by itself prevent a working desktop.
+        try {
+          await this.run([
+            "config", "device", "add", spec.id, "novnc", "proxy",
+            `listen=tcp:127.0.0.1:${spec.desktopPort}`,
+            "connect=tcp:0.0.0.0:6080"
+          ]);
+        } catch (error) {
+          if (!PROXY_FORBIDDEN.test(errorMessage(error))) throw error;
+        }
       }
       await this.run(["start", spec.id], 120_000);
       if (spec.desktopEnabled !== false) {
@@ -193,15 +224,55 @@ export class IncusWorkerDriver implements WorkerDriver {
         ], CLOUD_INIT_TIMEOUT_MS);
       }
     } catch (error) {
+      // cloud-init's log is the only place a provisioning failure is
+      // explained, and destroying the container destroys it. Surface the
+      // reason before cleanup so a failed run is diagnosable at all.
+      const reason = containerCreated
+        ? await this.provisioningFailureReason(spec).catch(() => "")
+        : "";
       try {
         await this.destroy(spec);
       } catch (cleanupError) {
         throw new Error(
-          `${errorMessage(error)}; Cleanup failed: ${errorMessage(cleanupError)}`,
+          `${errorMessage(error)}${reason}; Cleanup failed: ${errorMessage(cleanupError)}`,
           { cause: cleanupError }
         );
       }
-      throw error;
+      throw reason
+        ? new Error(`${errorMessage(error)}${reason}`, { cause: error })
+        : error;
+    }
+  }
+
+  // Best-effort. Absent or unreadable logs simply contribute nothing.
+  private async provisioningFailureReason(spec: ComputerSpec): Promise<string> {
+    const log = await this.run([
+      "exec", spec.id, "--", "sh", "-c",
+      "tail -n 60 /var/log/cloud-init-output.log 2>/dev/null || true"
+    ], 60_000);
+    const tail = log.split("\n")
+      .filter(line => line.trim().length > 0 && line.trim() !== ".")
+      .slice(-8)
+      .join(" | ");
+    return tail ? `; cloud-init log tail: ${tail}` : "";
+  }
+
+  // cloud-init exiting 0 only means the units were written and started.
+  // A desktop that is not actually up must fail, not be reported ready.
+  async verifyDesktop(id: string): Promise<void> {
+    const output = await this.run([
+      "exec", id, "--", "systemctl", "is-active",
+      "syntrum-xvfb.service", "syntrum-desktop.service",
+      "syntrum-vnc.service", "syntrum-novnc.service"
+    ]);
+    const states = output.trim().split(/\s+/);
+    const failed = DESKTOP_UNITS.filter((_, index) => states[index] !== "active");
+    if (states.length !== DESKTOP_UNITS.length || failed.length > 0) {
+      throw new Error(
+        `Desktop services not active: ${
+          failed.length > 0 ? failed.join(", ") : output.trim() || "no output"
+        }`
+      );
     }
   }
 
