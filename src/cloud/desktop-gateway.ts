@@ -94,7 +94,7 @@ export class DesktopGateway {
   async handleUpgrade(
     req: IncomingMessage,
     socket: Duplex,
-    head: Buffer,
+    head: Uint8Array,
     computerId: string
   ): Promise<void> {
     if (!this.options.authorize(req)) {

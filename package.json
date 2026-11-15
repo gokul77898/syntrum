@@ -20,7 +20,8 @@
     "cloud:dev": "tsx src/cloud/server.ts",
     "ui": "tsx src/cloud/browser-ui.ts",
     "typecheck": "tsc --noEmit",
-    "test:live-guest": "tsx src/acceptance/incus-guest.ts"
+    "test:live-guest": "tsx src/acceptance/incus-guest.ts",
+    "test:live-gateway": "tsx src/acceptance/desktop-gateway.ts"
   },
   "engines": {
     "node": ">=26"
