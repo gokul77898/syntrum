@@ -28,6 +28,17 @@ function required(name: string): string {
 
 const evidence: Record<string, unknown> = { status: "STARTED" };
 
+// Restart readiness is polled, not read once. Generous enough that a slow
+// container boot is not mistaken for a dead desktop.
+const DESKTOP_UNIT_NAMES = [
+  "syntrum-xvfb.service",
+  "syntrum-desktop.service",
+  "syntrum-vnc.service",
+  "syntrum-novnc.service"
+] as const;
+const RESTART_READY_TIMEOUT_MS = 120_000;
+const RESTART_POLL_INTERVAL_MS = 3_000;
+
 // Everything needed to explain a failure in one run instead of the next one.
 async function collectDiagnostics(
   id: string,
@@ -153,16 +164,32 @@ async function main(): Promise<void> {
     }
 
     // Restart is the claim under test: a unit that is not enabled dies here.
+    // incus restart returns when the container is running, not when systemd has
+    // reached multi-user.target, so the units must be polled rather than read
+    // once. A bounded wait distinguishes a slow boot (the deadline passes with
+    // the units up) from a real failure (it expires with them still down).
     await service.restart(computerId);
-    const afterRestart = await guest(computerId, [
-      "systemctl", "is-active", "syntrum-xvfb.service", "syntrum-desktop.service",
-      "syntrum-vnc.service", "syntrum-novnc.service"
-    ]);
-    evidence.unitsAfterRestart = afterRestart.split(/\s+/);
-    if (evidence.unitsAfterRestart instanceof Array &&
-        evidence.unitsAfterRestart.some(s => s !== "active")) {
-      throw new Error(`Desktop did not survive restart: ${afterRestart}`);
+    const restartStartedAt = Date.now();
+    let afterRestart = "";
+    for (;;) {
+      afterRestart = await guest(computerId, [
+        "systemctl", "is-active", "syntrum-xvfb.service", "syntrum-desktop.service",
+        "syntrum-vnc.service", "syntrum-novnc.service"
+      ]);
+      const states = afterRestart.trim().split(/\s+/);
+      if (states.length === DESKTOP_UNIT_NAMES.length &&
+          states.every(state => state === "active")) {
+        break;
+      }
+      if (Date.now() - restartStartedAt > RESTART_READY_TIMEOUT_MS) {
+        throw new Error(
+          `Desktop did not survive restart within ${RESTART_READY_TIMEOUT_MS / 1000}s: ${afterRestart}`
+        );
+      }
+      await new Promise(resolve => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
     }
+    evidence.unitsAfterRestart = afterRestart.split(/\s+/);
+    evidence.restartReadySeconds = Math.round((Date.now() - restartStartedAt) / 100) / 10;
     const displayAfter = await guest(computerId, ["xdpyinfo", "-display", ":0"]);
     if (!displayAfter.includes("dimensions")) {
       throw new Error("The X display did not come back after restart");
