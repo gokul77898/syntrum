@@ -19,7 +19,8 @@
     "dev": "tsx watch src/server.ts",
     "cloud:dev": "tsx src/cloud/server.ts",
     "ui": "tsx src/cloud/browser-ui.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:live-guest": "tsx src/acceptance/incus-guest.ts"
   },
   "engines": {
     "node": ">=26"
