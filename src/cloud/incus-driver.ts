@@ -219,9 +219,18 @@ export class IncusWorkerDriver implements WorkerDriver {
       }
       await this.run(["start", spec.id], 120_000);
       if (spec.desktopEnabled !== false) {
-        await this.run([
-          "exec", spec.id, "--", "cloud-init", "status", "--wait"
+        // cloud-init exits non-zero when it records *recoverable* errors too —
+        // a clean desktop build still trips the benign scripts_user warning
+        // while reporting "status: done". Its exit code is therefore not a
+        // readiness signal, and verifyDesktop below is the real gate. Wait for
+        // it regardless, and treat only an explicit error status as fatal.
+        const reported = await this.run([
+          "exec", spec.id, "--", "sh", "-c",
+          "cloud-init status --wait >/dev/null 2>&1; cloud-init status"
         ], CLOUD_INIT_TIMEOUT_MS);
+        if (/^status: error$/m.test(reported)) {
+          throw new Error(`cloud-init reported an error: ${reported.trim()}`);
+        }
       }
     } catch (error) {
       // cloud-init's log is the only place a provisioning failure is

@@ -61,6 +61,33 @@ test("websockify binds the container port, not a fixed loopback port", async () 
   assert.match(cloudInit, /x11vnc -display :0 -rfbport 5900 -localhost/);
 });
 
+// The probe is one shell string whose exit code is the bare status command's:
+// "done" exits 0, "error" does not. The swallowed --wait exit code is what
+// used to abort a healthy build.
+test("a non-zero cloud-init --wait exit that reports done does not fail creation", async () => {
+  const calls: string[][] = [];
+  const driver = new IncusWorkerDriver(async args => {
+    calls.push([...args]);
+    if (args.some(a => a.includes("cloud-init status"))) return "status: done\n";
+    return args[1] === "list" ? '[{"status":"Running"}]' : "";
+  });
+  await driver.create(spec);
+  assert.ok(calls.some(args => args[1] === "start"));
+});
+
+test("cloud-init reporting error status still aborts creation", async () => {
+  const calls: string[][] = [];
+  const driver = new IncusWorkerDriver(async args => {
+    calls.push([...args]);
+    if (args.some(a => a.includes("cloud-init status"))) {
+      // A real error makes the bare status command exit non-zero.
+      throw new Error("status: error");
+    }
+    return args[1] === "list" ? '[{"status":"Running"}]' : "";
+  });
+  await assert.rejects(driver.create(spec), /status: error/);
+});
+
 // write-files runs before users-groups. An entry owned by syntrum fails there
 // and aborts every later file, so none of the four units get written and the
 // runcmd then fails with "Unit file ... does not exist".
