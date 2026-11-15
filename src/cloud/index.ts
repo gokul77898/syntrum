@@ -1,4 +1,9 @@
 export { IncusWorkerDriver, isIncusNotFound } from "./incus-driver.js";
+export {
+  GuestProvisioner,
+  nodeInstallScript,
+  resolveNodePlatform
+} from "./guest-provisioner.js";
 export { CloudComputerService } from "./service.js";
 export { createSshCommandRunner } from "./ssh-command-runner.js";
 export { CloudComputerStore } from "./store.js";
