@@ -75,6 +75,14 @@ ${aptConf ? `apt:\n  conf: |\n${aptConf.split("\n").map(line => `    ${line}`).j
   - git
   - curl
   - ca-certificates
+  # The macOS-like surface: Arc theme, Papirus icons, Inter font, Plank dock.
+  # epiphany-browser is the only browser here; see syntrum-theme for why its
+  # sandbox has to be off in this container.
+  - arc-theme
+  - papirus-icon-theme
+  - fonts-inter
+  - plank
+  - epiphany-browser
 users:
   - name: syntrum
     groups:
@@ -115,8 +123,15 @@ write_files:
       Environment=HOME=/home/syntrum
       Environment=DISPLAY=${DESKTOP_DISPLAY}
       ExecStart=/usr/bin/startxfce4
+      # A desktop that exits is a fault, even when it exits cleanly: a stranded
+      # epiphany/plank leaves the screen with no panel, wallpaper or dock.
       Restart=always
       RestartSec=3
+      # XFCE keeps its session when it has no session manager to talk to, so the
+      # default 90s deadline leaves a whole second desktop stacked behind every
+      # restart. Stop it hard and fast instead.
+      KillMode=control-group
+      TimeoutStopSec=5
 
       [Install]
       WantedBy=multi-user.target
@@ -155,11 +170,111 @@ write_files:
 
       [Install]
       WantedBy=multi-user.target
+  # Applied by runcmd after the session exists. Kept as a script because xfconf
+  # property names are unforgiving: XFCE reads /Net/ThemeName, not /ThemeName,
+  # and xfconf-query silently creates the wrong one without complaining.
+  - path: /usr/local/bin/syntrum-theme
+    owner: root:root
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # SYNTRUM guest desktop appearance. Idempotent; safe to re-run.
+      set -u
+      export DISPLAY=${DESKTOP_DISPLAY}
+
+      as_user() { su syntrum -c "HOME=/home/syntrum DISPLAY=${DESKTOP_DISPLAY} $1"; }
+
+      # xfconf writes the per-channel XML itself, so this works with no daemon
+      # and no session running.
+      as_user '
+        xfconf-query -c xsettings -p /Net/ThemeName -s Arc
+        xfconf-query -c xsettings -p /Net/IconThemeName -s Papirus-Dark
+        xfconf-query -c xsettings -p /Gtk/FontName -s "Inter 11"
+        xfconf-query -c xsettings -p /Gtk/MonospaceFontName -s "Monospace 11"
+        xfconf-query -c xsettings -p /Gtk/CursorThemeName -s Adwaita
+        xfconf-query -c xfwm4 -p /general/theme -s Arc
+        xfconf-query -c xfwm4 -p /general/button_layout -s "CHM|"
+        xfconf-query -c xfwm4 -p /general/use_compositing -s false -t bool --create
+      '
+
+      # GTK apps read this directly; xfsettingsd is not always publishing.
+      for v in 3.0 4.0; do
+        install -d -o syntrum -g syntrum /home/syntrum/.config/gtk-$v
+        cat > /home/syntrum/.config/gtk-$v/settings.ini <<'INI'
+      [Settings]
+      gtk-theme-name=Arc
+      gtk-icon-theme-name=Papirus-Dark
+      gtk-font-name=Inter 11
+      gtk-cursor-theme-name=Adwaita
+      gtk-cursor-theme-size=24
+      gtk-decoration-layout=close,minimize:
+      INI
+        chown syntrum:syntrum /home/syntrum/.config/gtk-$v/settings.ini
+      done
+
+      # Backdrop: a solid colour, because no SVG pixbuf loader is installed and
+      # the stock xfce-shapes.svg wallpaper therefore paints nothing at all.
+      as_user '
+        for ws in workspace0 workspace1 workspace2 workspace3; do
+          p=/backdrop/screen0/monitorscreen/$ws
+          xfconf-query -c xfce4-desktop -p $p/image-style -s 0 -t int --create
+          xfconf-query -c xfce4-desktop -p $p/color-style -s 0 -t int --create
+          xfconf-query -c xfce4-desktop -p $p/rgba1 --create \
+            -s 0.113 -t double -s 0.125 -t double -s 0.145 -t double -s 1.0 -t double
+        done
+      '
+
+      install -d -o syntrum -g syntrum /home/syntrum/.local/share/applications
+      install -d -o syntrum -g syntrum /home/syntrum/.config/autostart
+      install -d -o syntrum -g syntrum /home/syntrum/.config/plank/dock1/launchers
+
+      # Google as a dock launcher rather than a window at login: a browser that
+      # autostarts covers the whole desktop and hides the panel and dock.
+      cat > /home/syntrum/.local/share/applications/syntrum-google.desktop <<'DESKTOP'
+      [Desktop Entry]
+      Type=Application
+      Name=Google
+      Comment=Open Google in the guest desktop
+      Exec=env WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1 epiphany-browser --new-window https://www.google.com
+      Icon=epiphany
+      Terminal=false
+      Categories=Network;WebBrowser;
+      DESKTOP
+      cat > /home/syntrum/.config/plank/dock1/launchers/gl-google.dockitem <<'DOCKITEM'
+      [PlankDockItemPreferences]
+      Launcher=file:///home/syntrum/.local/share/applications/syntrum-google.desktop
+      DOCKITEM
+      cat > /home/syntrum/.config/plank/dock1/launchers/gl-files.dockitem <<'DOCKITEM'
+      [PlankDockItemPreferences]
+      Launcher=file:///usr/share/applications/thunar.desktop
+      DOCKITEM
+      cat > /home/syntrum/.config/plank/dock1/launchers/gl-terminal.dockitem <<'DOCKITEM'
+      [PlankDockItemPreferences]
+      Launcher=file:///usr/share/applications/xfce4-terminal.desktop
+      DOCKITEM
+      cat > /home/syntrum/.config/autostart/plank.desktop <<'DESKTOP'
+      [Desktop Entry]
+      Type=Application
+      Name=Plank
+      Comment=SYNTRUM dock
+      Exec=plank
+      Terminal=false
+      X-GNOME-Autostart-enabled=true
+      DESKTOP
+
+      chown -R syntrum:syntrum /home/syntrum/.config/plank /home/syntrum/.config/autostart \
+        /home/syntrum/.local/share/applications
 runcmd:
+  # Appearance first: with no xfconf daemon running yet these writes go straight
+  # to XML, so the session below starts up already themed.
+  - /usr/local/bin/syntrum-theme
   - systemctl enable --now syntrum-xvfb.service
   - systemctl enable --now syntrum-desktop.service
   - systemctl enable --now syntrum-vnc.service
   - systemctl enable --now syntrum-novnc.service
+  # Re-apply on a live session too: xfsettingsd watches xfconf, so this covers
+  # the case where the session came up before the theme was written.
+  - /usr/local/bin/syntrum-theme
 `;
 }
 

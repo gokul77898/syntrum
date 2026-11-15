@@ -198,3 +198,92 @@ test("verification is skipped when no desktop was requested", async t => {
   assert.equal(computer.status, "running");
   assert.equal(verified, false);
 });
+
+/* ── guest desktop appearance ────────────────────────────────────────
+ * These guard the theming found by hand on a live guest. Each one encodes a
+ * mistake that produced a visibly wrong desktop, not a style preference.
+ */
+
+test("the theme is written to the xfconf keys XFCE actually reads", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+
+  // XFCE reads /Net/ThemeName. A bare /ThemeName is created silently by
+  // xfconf-query and read by nothing, so the desktop keeps its default look
+  // while every check reports success.
+  assert.match(cloudInit, /-c xsettings -p \/Net\/ThemeName -s Arc/);
+  assert.match(cloudInit, /-c xsettings -p \/Net\/IconThemeName -s Papirus-Dark/);
+  assert.match(cloudInit, /-c xsettings -p \/Gtk\/FontName -s "Inter 11"/);
+  assert.match(cloudInit, /-c xfwm4 -p \/general\/button_layout -s "CHM\|"/);
+  assert.doesNotMatch(cloudInit, /-c xsettings -p \/ThemeName/);
+  assert.doesNotMatch(cloudInit, /-c xsettings -p \/IconThemeName/);
+});
+
+test("the desktop packages needed for that theme are installed", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+  for (const pkg of ["arc-theme", "papirus-icon-theme", "fonts-inter", "plank"]) {
+    assert.match(cloudInit, new RegExp(`^ {2}- ${pkg}$`, "m"), `${pkg} is installed`);
+  }
+});
+
+// A solid backdrop, not the stock SVG: no SVG pixbuf loader is installed in
+// this image, so xfce-shapes.svg paints nothing and the root window stays black.
+test("the backdrop is a solid colour rather than an unloadable SVG", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+  assert.match(cloudInit, /image-style -s 0 -t int --create/);
+  assert.match(cloudInit, /rgba1 --create/);
+  assert.doesNotMatch(cloudInit, /last-image -s .*\.svg/);
+});
+
+// XFCE keeps its session when no session manager answers, so the default 90s
+// deadline left a complete second desktop stacked behind every restart.
+test("the desktop unit stops hard instead of leaving a stacked session", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+  const unit = cloudInit.split("syntrum-desktop.service")[1]?.split("syntrum-vnc.service")[0] ?? "";
+  assert.match(unit, /KillMode=control-group/);
+  assert.match(unit, /TimeoutStopSec=5/);
+  // A clean exit still strands epiphany and plank; the desktop must come back.
+  assert.match(unit, /Restart=always/);
+});
+
+test("the theme is applied before the session starts, and again after", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+  const runcmd = cloudInit.split("runcmd:")[1] ?? "";
+  const lines = runcmd.split("\n").filter(line => line.trim().startsWith("- "));
+  const theme = lines.findIndex(line => line.includes("syntrum-theme"));
+  const session = lines.findIndex(line => line.includes("enable --now syntrum-desktop.service"));
+  assert.ok(theme >= 0, "the theme script runs");
+  assert.ok(session >= 0, "the session is enabled");
+  assert.ok(theme < session, "appearance is written before the session reads it");
+});
+
+// WebKit's sandbox cannot start where unprivileged user namespaces are denied
+// (bwrap: "Creating new namespace failed"), so Epiphany has nothing to fall
+// back on. This is the guest's only browser.
+test("the browser launcher carries the sandbox opt-out", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+  assert.match(cloudInit, /WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1/);
+  assert.match(cloudInit, /epiphany-browser --new-window https:\/\/www\.google\.com/);
+});
+
+// A browser that autostarts covers the panel, wallpaper and dock. It is a dock
+// launcher instead.
+test("no browser autostarts over the desktop", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+  const autostart = cloudInit.split(".config/autostart/")[1] ?? "";
+  assert.doesNotMatch(autostart, /epiphany-browser --new-window/);
+  assert.match(cloudInit, /dock1\/launchers\/gl-google\.dockitem/);
+});
