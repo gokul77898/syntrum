@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { OPERATOR, ownsComputer, type Caller } from "./accounts.js";
+import { guestSocketPath } from "./guest-bridge.js";
 import { CloudComputerStore } from "./store.js";
 import {
   CloudError,
@@ -247,6 +248,29 @@ export class CloudComputerService {
       protocol: "noVNC over SSH tunnel",
       sshTunnelCommand: `ssh -L ${computer.desktopPort}:127.0.0.1:${computer.desktopPort} ${this.workerHost}`,
       browserUrlAfterTunnel: localUrl,
+      publicExposure: false
+    };
+  }
+
+  /**
+   * Where an agent connects to reach this computer's workspace.
+   *
+   * The socket path is derived from the computer id here, not supplied by the
+   * caller, so a request cannot aim a tunnel at another guest. The workspace is
+   * reported as the single shared id agents already use.
+   */
+  agentAccess(id: string, caller: Caller = OPERATOR) {
+    const computer = this.requireAccess(id, caller);
+    if (computer.status !== "running") {
+      throw new CloudError(409, "COMPUTER_NOT_RUNNING", "Cloud computer must be running to reach its workspace");
+    }
+    return {
+      computerId: id,
+      protocol: "SYNTRUM agent bus over an SSH unix-socket tunnel",
+      socketPath: guestSocketPath(id),
+      workspaceId: "main",
+      workspaceRoot: "/workspace",
+      workerHost: this.workerHost,
       publicExposure: false
     };
   }

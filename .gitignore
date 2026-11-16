@@ -5,3 +5,4 @@ data/
 .syntrum-operator-token
 *.log
 .DS_Store
+report.html

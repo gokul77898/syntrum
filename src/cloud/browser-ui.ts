@@ -311,6 +311,7 @@ function toControlPlanePath(path: string): string | undefined {
     /^\/api\/computers$/,
     /^\/api\/computers\/[^/]+$/,
     /^\/api\/computers\/[^/]+\/(start|stop|restart|details|access)$/,
+    /^\/api\/computers\/[^/]+\/agent-access$/,
     /^\/api\/workers$/,
     /^\/api\/gpus$/,
     /^\/api\/gpu\/allocations$/,

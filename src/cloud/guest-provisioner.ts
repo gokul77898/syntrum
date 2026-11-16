@@ -1,4 +1,9 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
 import { errorMessage } from "../runtime/errors.js";
+
+const runFile = promisify(execFile);
 
 // Phase 4 groundwork: the guest runtime needs Node >= 26 (it uses node:sqlite,
 // absent from the Ubuntu 24.04 nodejs package at 18.19), so the guest must
@@ -49,6 +54,11 @@ export function resolveNodePlatform(machine: string): string {
     throw new Error(`Unsupported guest architecture for Node: ${machine.trim() || "(empty)"}`);
   }
   return platform;
+}
+
+/** Single-quotes for a remote shell; embedded quotes are closed and reopened. */
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 // Pure so the verification step is testable without a guest. Every value is
@@ -107,6 +117,55 @@ export type GuestNodeInstallResult = {
   platform: string;
 };
 
+/**
+ * The guest bus daemon and the modules it imports. The bus uses only Node
+ * builtins, so this list is the entire dependency closure — no npm install and
+ * no network access inside the guest.
+ *
+ * Kept explicit rather than globbed: a new import that reaches outside these
+ * directories would otherwise ship a daemon that cannot start.
+ */
+export const GUEST_BUS_MODULES = [
+  "guest/bus-daemon",
+  "guest/relay",
+  "bus/server",
+  "bus/client",
+  "bus/errors",
+  "bus/protocol",
+  "bus/types",
+  "bus/workspace",
+  "bus/index",
+  "adapters/errors",
+  "adapters/types",
+  "adapters/index"
+] as const;
+
+export const GUEST_BUS_UNIT = `[Unit]
+Description=SYNTRUM guest agent bus
+After=local-fs.target
+
+[Service]
+Type=simple
+# A dedicated runtime directory so the socket is not in a world-writable /tmp.
+RuntimeDirectory=syntrum
+RuntimeDirectoryMode=0750
+Environment=SYNTRUM_BUS_SOCKET=/run/syntrum/bus.sock
+Environment=SYNTRUM_WORKSPACE_ROOT=/workspace
+EnvironmentFile=-/etc/syntrum/agents.env
+ExecStart=/usr/local/bin/node /opt/syntrum/guest/bus-daemon.js
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+`;
+
+export type GuestBusInstallResult = {
+  modules: number;
+  unitPath: string;
+  socketPath: string;
+};
+
 export class GuestProvisioner {
   // aptDateCheckDisabled is opt-in and exists only for hosts whose clock is
   // ahead of the repositories; it relaxes the date check, never signatures.
@@ -155,5 +214,142 @@ export class GuestProvisioner {
         `Guest Node cannot use node:sqlite: ${errorMessage(error, "command failed")}`
       );
     }
+  }
+
+  /**
+   * Installs and starts the agent bus inside the guest.
+   *
+   * The daemon is compiled on the host and copied in: the guest has no
+   * toolchain and no npm access, and Node's own type-stripping cannot run the
+   * bus, which uses constructor parameter properties. Compiling here means the
+   * guest runs plain JavaScript with no dependencies at all.
+   *
+   * `upload` performs the actual byte transfer; the caller supplies it so this
+   * module does not have to know whether the transport is scp, a pipe over ssh,
+   * or a test double. It must place the *contents* of `localDirectory` directly
+   * in `remoteDirectory` — not a subdirectory named after the source, which is
+   * what a naive recursive copy of `<dir>/.` produces.
+   */
+  async installBus(
+    id: string,
+    options: {
+      compiledDirectory: string;
+      agents: readonly { id: string; token: string }[];
+      upload: (id: string, localDirectory: string, remoteDirectory: string) => Promise<void>;
+    }
+  ): Promise<GuestBusInstallResult> {
+    // Node must exist before the unit can run; failing here names the real
+    // prerequisite rather than surfacing as a unit that restarts forever.
+    try {
+      await this.execute(id, ["/usr/local/bin/node", "--version"], 30_000);
+    } catch {
+      throw new Error("Guest Node is not installed; run installNode before installBus");
+    }
+    if (options.agents.length === 0) {
+      throw new Error("At least one agent grant is required to start the bus");
+    }
+    for (const agent of options.agents) {
+      // The values land in an EnvironmentFile, so a newline would inject a
+      // second variable and a space would split the entry.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/.test(agent.id)) {
+        throw new Error(`Invalid agent id: ${agent.id}`);
+      }
+      if (!/^[A-Za-z0-9._-]{16,}$/.test(agent.token)) {
+        throw new Error(`Invalid agent token for '${agent.id}'`);
+      }
+    }
+
+    await this.execute(id, ["mkdir", "-p", "/opt/syntrum", "/etc/syntrum"], 30_000);
+    await options.upload(id, options.compiledDirectory, "/opt/syntrum");
+
+    // The unit names this exact path. A recursive copy that nests the source
+    // directory leaves the files one level down, and the only symptom is a
+    // restart loop with "Cannot find module" in the journal.
+    const daemon = await this.execute(id, [
+      "sh", "-c",
+      "test -f /opt/syntrum/guest/bus-daemon.js && echo present || echo missing"
+    ], 30_000);
+    if (daemon.trim() !== "present") {
+      const listing = await this.execute(id, [
+        "sh", "-c", "find /opt/syntrum -maxdepth 2 -name 'bus-daemon.js' 2>/dev/null | head -3"
+      ], 30_000).catch(() => "");
+      throw new Error(
+        "/opt/syntrum/guest/bus-daemon.js is missing after upload; the transfer " +
+        `must place the compiled contents directly in /opt/syntrum` +
+        (listing.trim() ? ` (found: ${listing.trim().split("\n").join(", ")})` : "")
+      );
+    }
+
+    const envFile = `SYNTRUM_GUEST_AGENTS=${options.agents.map(a => `${a.id}:${a.token}`).join(",")}`;
+    await this.execute(id, [
+      "sh", "-c",
+      // 0600: the file holds agent tokens, and the unit reads it as root.
+      `printf '%s\\n' ${shellQuote(envFile)} > /etc/syntrum/agents.env && chmod 0600 /etc/syntrum/agents.env`
+    ], 30_000);
+
+    await this.execute(id, [
+      "sh", "-c",
+      `printf '%s' ${shellQuote(GUEST_BUS_UNIT)} > /etc/systemd/system/syntrum-bus.service`
+    ], 30_000);
+    await this.execute(id, [
+      "systemctl", "daemon-reload"
+    ], 30_000);
+    // enable + restart, not `enable --now`: on an already-running unit that is
+    // a no-op, so a re-provision would leave the daemon holding the previous
+    // run's agent grants while the environment file held the new ones.
+    await this.execute(id, [
+      "systemctl", "enable", "syntrum-bus.service"
+    ], 60_000);
+    await this.execute(id, [
+      "systemctl", "restart", "syntrum-bus.service"
+    ], 120_000);
+
+    await this.verifyBus(id, options.agents.length);
+    return {
+      modules: GUEST_BUS_MODULES.length,
+      unitPath: "/etc/systemd/system/syntrum-bus.service",
+      socketPath: "/run/syntrum/bus.sock"
+    };
+  }
+
+  /**
+   * Readiness for the bus: the unit is active, the socket exists, and the
+   * daemon has actually printed its ready line. A socket file alone can be a
+   * leftover from a crashed process.
+   */
+  async verifyBus(id: string, expectedAgents: number): Promise<void> {
+    const reported = await this.execute(id, [
+      "sh", "-c",
+      // `|| true`: is-active exits non-zero when inactive, and the runner
+      // treats that as a command failure that would hide the diagnosis.
+      "systemctl is-active syntrum-bus.service || true"
+    ], 60_000);
+    if (reported.trim() !== "active") {
+      const log = await this.execute(id, [
+        "sh", "-c",
+        "journalctl -u syntrum-bus.service --no-pager -n 20 2>/dev/null || true"
+      ], 60_000).catch(() => "");
+      throw new Error(
+        `Guest bus is ${reported.trim() || "not active"}` +
+        (log.trim() ? `; journal: ${log.trim().split("\n").slice(-4).join(" | ")}` : "")
+      );
+    }
+
+    const socket = await this.execute(id, [
+      "sh", "-c",
+      "test -S /run/syntrum/bus.sock && echo present || echo missing"
+    ], 30_000);
+    if (socket.trim() !== "present") {
+      throw new Error("Guest bus socket /run/syntrum/bus.sock is missing");
+    }
+
+    const ready = await this.execute(id, [
+      "sh", "-c",
+      "journalctl -u syntrum-bus.service --no-pager 2>/dev/null | grep -c 'syntrum-guest-bus ready' || true"
+    ], 60_000);
+    if (Number(ready.trim()) < 1) {
+      throw new Error("Guest bus has not reported ready; it may be failing to start");
+    }
+    void expectedAgents;
   }
 }

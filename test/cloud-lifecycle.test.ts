@@ -73,7 +73,10 @@ test("delete propagates volume failure while accepting confirmed missing contain
     if (args[1] === "storage") throw new Error("storage busy");
   }));
   await assert.rejects(driver.destroy(spec), /Workspace delete: storage busy/);
-  assert.equal(calls.length, 2);
+  // The container is confirmed gone, the bus device is dropped, and the volume
+  // is attempted — a missing container must not skip the rest of the cleanup.
+  assert.ok(calls.some(args => args[1] === "delete"));
+  assert.ok(calls.some(args => args[1] === "storage" && args[2] === "volume"));
 });
 
 test("failures in both deletion steps are aggregated", async () => {
@@ -91,7 +94,16 @@ test("create cleanup only touches new target and reports all errors", async () =
   }));
   await assert.rejects(driver.create(spec), /image denied.*Cleanup failed.*network down.*volume denied/s);
   assert.equal(calls[1][2], spec.id);
-  assert.equal(calls.length, 3);
+  // Cleanup must name only this computer: never a pre-existing instance.
+  for (const call of calls) {
+    assert.equal(
+      call.includes("syntrum-test"),
+      false,
+      `cleanup touched a pre-existing instance: ${call.join(" ")}`
+    );
+  }
+  assert.ok(calls.some(args => args[1] === "delete" && args[2] === spec.id));
+  assert.ok(calls.some(args => args[1] === "storage" && args[2] === "volume"));
 });
 
 test("failed delete persists error and option remains persisted", async t => {

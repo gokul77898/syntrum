@@ -160,9 +160,15 @@ async function handle(
     }
   }
 
-  const match = pathname.match(/^\/computers\/([^/]+)(?:\/(start|stop|restart|access|details|exec|fork))?$/);
+  const match = pathname.match(/^\/computers\/([^/]+)(?:\/(start|stop|restart|access|agent-access|details|exec|fork))?$/);
   if (match) {
     const [, id, operation] = match;
+    if (operation === "agent-access" && method === "GET") {
+      // Ownership is enforced inside agentAccess, which reports another
+      // account's computer as missing rather than forbidden.
+      respond(res, 200, options.service.agentAccess(id, caller));
+      return;
+    }
     if (operation === "fork" && method === "POST") {
       const body = await readJson(req);
       // Only the sizing fields are read; the id, port and owner are assigned

@@ -5,6 +5,7 @@ import type {
   ComputerSpec,
   WorkerDriver
 } from "./types.js";
+import { guestSocketPath } from "./guest-bridge.js";
 
 // The /cloud variant is required: it ships cloud-init, which the desktop path
 // depends on. The plain images:ubuntu/24.04 does not, so `cloud-init status`
@@ -335,6 +336,9 @@ export class IncusWorkerDriver implements WorkerDriver {
           if (!PROXY_FORBIDDEN.test(errorMessage(error))) throw error;
         }
       }
+      // Exposed before start so the socket exists on the worker as soon as the
+      // guest's bus begins listening; the device is inert until then.
+      await this.exposeGuestBus(spec.id, guestSocketPath(spec.id));
       await this.run(["start", spec.id], 120_000);
       if (spec.desktopEnabled !== false) {
         // cloud-init exits non-zero when it records *recoverable* errors too —
@@ -427,9 +431,14 @@ export class IncusWorkerDriver implements WorkerDriver {
   }
 
   async destroy(spec: Pick<ComputerSpec, "id" | "storageVolume">): Promise<void> {
+    // The proxy device dies with the container, but the socket file it created
+    // on the worker does not: without this, a re-created computer with the same
+    // id would find a stale socket in its way. Removed after the container, so
+    // a failed create that never added the device does not gain a call here.
     const containerError = await captureFailure(() =>
       this.run(["delete", spec.id, "--force"], 120_000)
     );
+    await this.unexposeGuestBus(spec.id);
     const volumeError = await captureFailure(() => this.run([
       "storage", "volume", "delete", this.storagePool, spec.storageVolume
     ], 120_000));
@@ -502,5 +511,39 @@ export class IncusWorkerDriver implements WorkerDriver {
 
   async execute(id: string, args: readonly string[], timeoutMs?: number): Promise<string> {
     return this.run(["exec", id, "--", ...args], timeoutMs);
+  }
+
+  /**
+   * Exposes the guest's agent bus socket on the worker's filesystem.
+   *
+   * The socket inside the guest is not on a shared mount, so a proxy device is
+   * what makes it dialable from the worker at all — and that is the only path
+   * the host bridge can tunnel over. `bind=host` creates the socket on the
+   * worker, and mode 0600 keeps it to the operator account rather than every
+   * local user on the worker.
+   *
+   * A restricted project may forbid proxy devices, exactly as it does for the
+   * desktop's port proxy. That is tolerated here: the computer is still usable,
+   * and a later tunnel attempt reports the missing socket clearly rather than
+   * failing the whole provision.
+   */
+  async exposeGuestBus(id: string, socketPath: string): Promise<void> {
+    try {
+      await this.run([
+        "config", "device", "add", id, "agent-bus", "proxy",
+        `listen=unix:${socketPath}`,
+        "connect=unix:/run/syntrum/bus.sock",
+        "bind=host",
+        "mode=0600"
+      ]);
+    } catch (error) {
+      if (!PROXY_FORBIDDEN.test(errorMessage(error))) throw error;
+    }
+  }
+
+  async unexposeGuestBus(id: string): Promise<void> {
+    await captureFailure(() =>
+      this.run(["config", "device", "remove", id, "agent-bus"], 60_000)
+    );
   }
 }

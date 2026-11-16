@@ -3,7 +3,9 @@ export {
   GuestProvisioner,
   nodeInstallScript,
   nodeRuntimePackages,
-  resolveNodePlatform
+  resolveNodePlatform,
+  GUEST_BUS_MODULES,
+  GUEST_BUS_UNIT
 } from "./guest-provisioner.js";
 export { CloudComputerService } from "./service.js";
 export {
@@ -18,6 +20,13 @@ export {
 export type { Account, Caller } from "./accounts.js";
 export { createBrowserUi } from "./browser-ui.js";
 export { DesktopGateway } from "./desktop-gateway.js";
+export {
+  GuestBusClient,
+  guestSocketPath,
+  sshArgs,
+  GUEST_SOCKET_DIRECTORY
+} from "./guest-bridge.js";
+export type { GuestTransport, GuestBridgeSsh } from "./guest-bridge.js";
 export { createSshCommandRunner } from "./ssh-command-runner.js";
 export { CloudComputerStore } from "./store.js";
 export { createCloudHttpServer } from "./server.js";
