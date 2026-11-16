@@ -21,6 +21,7 @@
     "ui": "tsx src/cloud/browser-ui.ts",
     "typecheck": "tsc --noEmit",
     "test:live-guest": "tsx src/acceptance/incus-guest.ts",
+    "test:live-gpu": "tsx src/acceptance/live-gpu.ts",
     "test:live-gateway": "tsx src/acceptance/desktop-gateway.ts",
     "test:live-agents": "tsx src/acceptance/live-agents.ts"
   },

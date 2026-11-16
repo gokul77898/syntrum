@@ -22,6 +22,12 @@ export type CloudComputerServiceOptions = {
   store: CloudComputerStore;
   driver: WorkerDriver;
   workerHost: string;
+  /**
+   * Per-worker drivers, keyed by `user@host`. When absent every computer uses
+   * `driver`, which is what the single-worker callers (and every existing test)
+   * mean. When present, a computer's own `workerHost` selects its driver.
+   */
+  drivers?: ReadonlyMap<string, WorkerDriver>;
   desktopEnabled?: boolean;
   /** Per-account ceiling; undefined uses each account's own maxComputers. */
   accountComputerLimit?: number;
@@ -30,6 +36,7 @@ export type CloudComputerServiceOptions = {
 export class CloudComputerService {
   private readonly store: CloudComputerStore;
   private readonly driver: WorkerDriver;
+  private readonly drivers?: ReadonlyMap<string, WorkerDriver>;
   private readonly workerHost: string;
   private readonly desktopEnabled: boolean;
   private readonly accountComputerLimit?: number;
@@ -38,9 +45,36 @@ export class CloudComputerService {
   constructor(options: CloudComputerServiceOptions) {
     this.store = options.store;
     this.driver = options.driver;
+    this.drivers = options.drivers;
     this.workerHost = options.workerHost;
     this.desktopEnabled = options.desktopEnabled !== false;
     this.accountComputerLimit = options.accountComputerLimit;
+  }
+
+  /**
+   * The driver that owns a given worker.
+   *
+   * A computer recorded on a worker the registry does not know about is a
+   * configuration error, not something to quietly run on the wrong host: the
+   * command would name a container that does not exist there. Single-worker
+   * callers have no registry, so every host maps to the one driver.
+   */
+  private driverFor(workerHost: string): WorkerDriver {
+    if (!this.drivers) return this.driver;
+    const driver = this.drivers.get(workerHost);
+    if (!driver) {
+      throw new CloudError(
+        503,
+        "WORKER_NOT_REGISTERED",
+        `No driver is configured for worker ${workerHost}`
+      );
+    }
+    return driver;
+  }
+
+  /** The workers a new computer may be created on. */
+  private knownWorkerHosts(): string[] {
+    return this.drivers ? [...this.drivers.keys()] : [this.workerHost];
   }
 
   /**
@@ -77,11 +111,23 @@ export class CloudComputerService {
     // caller cannot raise their own ceiling.
     this.assertCreateQuota(caller, input);
 
+    // A caller may name a worker, but only one that is actually registered —
+    // otherwise the container would be created in the control plane's records
+    // and nowhere else.
+    const workerHost = input.workerHost ?? this.workerHost;
+    if (!this.knownWorkerHosts().includes(workerHost)) {
+      throw new CloudError(
+        400,
+        "WORKER_NOT_REGISTERED",
+        `Unknown worker ${workerHost}; known workers: ${this.knownWorkerHosts().join(", ")}`
+      );
+    }
+
     const now = new Date().toISOString();
     const desktopEnabled = this.desktopEnabled && input.desktopEnabled !== false;
     const spec: ComputerSpec = {
       id,
-      workerHost: this.workerHost,
+      workerHost,
       image: DEFAULT_IMAGE,
       cpu,
       memoryMb,
@@ -100,11 +146,11 @@ export class CloudComputerService {
     });
     return this.runExclusive(id, async () => {
       try {
-        await this.driver.create(spec);
+        await this.driverFor(spec.workerHost).create(spec);
         // A requested desktop that never came up must not report "running".
         // The container is deliberately left in place so it can be inspected.
         if (desktopEnabled) {
-          await this.driver.verifyDesktop?.(id);
+          await this.driverFor(spec.workerHost).verifyDesktop?.(id);
         }
         return this.store.updateStatus(id, "running");
       } catch (error) {
@@ -115,15 +161,15 @@ export class CloudComputerService {
   }
 
   start(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
-    return this.transition(id, "starting", () => this.driver.start(id), "running", caller);
+    return this.transition(id, "starting", driver => driver.start(id), "running", caller);
   }
 
   stop(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
-    return this.transition(id, "stopping", () => this.driver.stop(id), "stopped", caller);
+    return this.transition(id, "stopping", driver => driver.stop(id), "stopped", caller);
   }
 
   restart(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
-    return this.transition(id, "restarting", () => this.driver.restart(id), "running", caller);
+    return this.transition(id, "restarting", driver => driver.restart(id), "running", caller);
   }
 
   destroy(id: string, caller: Caller = OPERATOR): Promise<CloudComputer> {
@@ -137,7 +183,7 @@ export class CloudComputerService {
       }
       this.store.updateStatus(id, "deleting");
       try {
-        await this.driver.destroy(computer);
+        await this.driverFor(computer.workerHost).destroy(computer);
         return this.store.updateStatus(id, "deleted");
       } catch (error) {
         this.store.updateStatus(id, "error", this.message(error));
@@ -150,11 +196,12 @@ export class CloudComputerService {
     this.validateId(id);
     // Ownership first: answering "details not supported" to a non-owner would
     // confirm the ID exists, which the 404 below is meant to hide.
-    this.requireAccess(id, caller);
-    if (!this.driver.inspectDetails) {
+    const computer = this.requireAccess(id, caller);
+    const driver = this.driverFor(computer.workerHost);
+    if (!driver.inspectDetails) {
       throw new CloudError(501, "DETAILS_NOT_SUPPORTED", "Worker does not expose resource details");
     }
-    return this.driver.inspectDetails(id);
+    return driver.inspectDetails(id);
   }
 
   /**
@@ -167,10 +214,13 @@ export class CloudComputerService {
    */
   async fork(sourceId: string, input: ForkComputerInput = {}, caller: Caller = OPERATOR): Promise<CloudComputer> {
     this.validateId(sourceId);
-    if (!this.driver.fork) {
+    const source = this.requireAccess(sourceId, caller);
+    // Resolved from the source below, never from the request: a fork must stay
+    // on the worker holding the disk it is copying.
+    const driver = this.driverFor(source.workerHost);
+    if (!driver.fork) {
       throw new CloudError(501, "FORK_NOT_SUPPORTED", "Worker does not support forking computers");
     }
-    const source = this.requireAccess(sourceId, caller);
     if (source.status !== "stopped") {
       throw new CloudError(
         409,
@@ -184,6 +234,7 @@ export class CloudComputerService {
     const now = new Date().toISOString();
     const spec: ComputerSpec = {
       id,
+      // The copy reads the source's disk, so it can only happen on that worker.
       workerHost: source.workerHost,
       image: source.image,
       cpu: input.cpu ?? source.cpu,
@@ -207,7 +258,7 @@ export class CloudComputerService {
       try {
         // A fork replaces the container's own storage: the copied root
         // filesystem already holds everything, so no new volume is created.
-        await this.driver.fork!(sourceId, id);
+        await driver.fork!(sourceId, id);
         return this.store.updateStatus(id, "running");
       } catch (error) {
         this.store.updateStatus(id, "error", this.message(error));
@@ -218,10 +269,12 @@ export class CloudComputerService {
 
   execute(id: string, args: readonly string[], timeoutMs?: number, caller: Caller = OPERATOR): Promise<string> {
     this.validateId(id);
-    if (this.requireAccess(id, caller).status !== "running") {
+    const computer = this.requireAccess(id, caller);
+    if (computer.status !== "running") {
       throw new CloudError(409, "COMPUTER_NOT_RUNNING", "Cloud computer must be running");
     }
-    if (!this.driver.execute) {
+    const driver = this.driverFor(computer.workerHost);
+    if (!driver.execute) {
       throw new CloudError(501, "EXEC_NOT_SUPPORTED", "Worker does not expose guest execution");
     }
     if (
@@ -231,7 +284,7 @@ export class CloudComputerService {
     ) {
       throw new CloudError(400, "INVALID_COMMAND", "Invalid guest command");
     }
-    return this.driver.execute(id, args, timeoutMs);
+    return driver.execute(id, args, timeoutMs);
   }
 
   access(id: string, caller: Caller = OPERATOR) {
@@ -246,7 +299,9 @@ export class CloudComputerService {
     return {
       computerId: id,
       protocol: "noVNC over SSH tunnel",
-      sshTunnelCommand: `ssh -L ${computer.desktopPort}:127.0.0.1:${computer.desktopPort} ${this.workerHost}`,
+      // The computer's own worker, not the default one: with several workers a
+      // tunnel to the default host reaches nothing at all.
+      sshTunnelCommand: `ssh -L ${computer.desktopPort}:127.0.0.1:${computer.desktopPort} ${computer.workerHost}`,
       browserUrlAfterTunnel: localUrl,
       publicExposure: false
     };
@@ -270,7 +325,7 @@ export class CloudComputerService {
       socketPath: guestSocketPath(id),
       workspaceId: "main",
       workspaceRoot: "/workspace",
-      workerHost: this.workerHost,
+      workerHost: computer.workerHost,
       publicExposure: false
     };
   }
@@ -278,7 +333,7 @@ export class CloudComputerService {
   async reconcile(): Promise<CloudComputer[]> {
     for (const computer of this.store.list()) {
       try {
-        const status = await this.driver.inspect(computer.id);
+        const status = await this.driverFor(computer.workerHost).inspect(computer.id);
         this.store.updateStatus(computer.id, status);
       } catch (error) {
         this.store.updateStatus(computer.id, "error", this.message(error));
@@ -294,16 +349,16 @@ export class CloudComputerService {
   private async transition(
     id: string,
     pending: CloudComputer["status"],
-    operation: () => Promise<void>,
+    operation: (driver: WorkerDriver) => Promise<void>,
     completed: CloudComputer["status"],
     caller: Caller = OPERATOR
   ): Promise<CloudComputer> {
     this.validateId(id);
     return this.runExclusive(id, async () => {
-      this.requireAccess(id, caller);
+      const computer = this.requireAccess(id, caller);
       this.store.updateStatus(id, pending);
       try {
-        await operation();
+        await operation(this.driverFor(computer.workerHost));
         return this.store.updateStatus(id, completed);
       } catch (error) {
         this.store.updateStatus(id, "error", this.message(error));

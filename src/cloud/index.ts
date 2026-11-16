@@ -4,9 +4,12 @@ export {
   nodeInstallScript,
   nodeRuntimePackages,
   resolveNodePlatform,
+  cudaRuntimeScript,
+  CUDA_RUNTIME_PACKAGES,
   GUEST_BUS_MODULES,
   GUEST_BUS_UNIT
 } from "./guest-provisioner.js";
+export type { GuestCudaInstallResult } from "./guest-provisioner.js";
 export { CloudComputerService } from "./service.js";
 export {
   AccountStore,
@@ -29,6 +32,6 @@ export {
 export type { GuestTransport, GuestBridgeSsh } from "./guest-bridge.js";
 export { createSshCommandRunner } from "./ssh-command-runner.js";
 export { CloudComputerStore } from "./store.js";
-export { createCloudHttpServer } from "./server.js";
+export { createCloudHttpServer, parseWorkerTargets } from "./server.js";
 export { checkWorkerHealth, WorkerStore, clockNeedsAptOverride, workerClockOffset } from "./worker.js";
 export * from "./types.js";

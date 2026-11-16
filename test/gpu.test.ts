@@ -196,7 +196,12 @@ test("NVIDIA agent parses real nvidia-smi output and constructs guest CUDA execu
   await agent.release(allocation);
   assert.ok(commands.some(args => args[0] === "nvidia-cuda-mps-control"));
   assert.ok(commands.some(args => args.includes("gpu") && args.includes("id=0")));
-  const execution = commands.find(args => args[1] === "exec")!;
+  // Not "the first exec": a CUDA preflight runs before the workload now, so
+  // select the exec that actually carries the memset source.
+  const execution = commands.find(args =>
+    args[1] === "exec" && args.some(value => value.includes("cudaMemset"))
+  )!;
+  assert.ok(execution, "the CUDA workload must run");
   assert.ok(execution.includes("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=40"));
   assert.ok(execution.includes("python3"));
   assert.ok(execution.includes("cudaMemset") === false);

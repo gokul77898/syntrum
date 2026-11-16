@@ -32,9 +32,11 @@ export type CreateComputerInput = {
   memoryMb?: number;
   diskGb?: number;
   desktopEnabled?: boolean;
+  /** Which registered worker to create on; defaults to the control plane's own. */
+  workerHost?: string;
 };
 
-export type ComputerSpec = Omit<Required<CreateComputerInput>, "desktopEnabled"> & {
+export type ComputerSpec = Omit<Required<CreateComputerInput>, "desktopEnabled" | "workerHost"> & {
   desktopEnabled?: boolean;
   id: string;
   workerHost: string;

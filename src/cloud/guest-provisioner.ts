@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
+import { CUDA_PROBE_SOURCE, CUDA_RUNTIME_LIBRARY } from "../gpu/types.js";
 import { errorMessage } from "../runtime/errors.js";
 
 const runFile = promisify(execFile);
@@ -117,6 +118,60 @@ export type GuestNodeInstallResult = {
   platform: string;
 };
 
+// The CUDA Runtime package on Ubuntu 24.04. Its section is multiverse, which a
+// minimal image has not always enabled, and it is the *only* source of the
+// runtime library — the NVIDIA CUDA apt repository is not configured on a
+// worker by bootstrap, so this is the package that has to resolve.
+const CUDA_RUNTIME_PACKAGE = "libcudart12";
+// python3 is not in the desktop package list, and the fixed workload is a Python
+// program using ctypes. Requesting it here is what makes the workload runnable
+// on a computer created without a desktop.
+const CUDA_RUNTIME_TOOL = "python3";
+
+export const CUDA_RUNTIME_PACKAGES = [
+  CUDA_RUNTIME_PACKAGE,
+  CUDA_RUNTIME_TOOL
+] as const;
+
+export type GuestCudaInstallResult = {
+  packages: readonly string[];
+  library: string;
+};
+
+/**
+ * Installs the guest-side CUDA runtime.
+ *
+ * The GPU driver libraries come from the host through `nvidia.runtime`; the
+ * CUDA *Runtime* (libcudart) is a separate userspace library that has to exist
+ * inside the guest. Without it there is a device and a driver but no runtime to
+ * link against, and the first thing a workload does is fail to dlopen.
+ *
+ * The last line is the only one that proves the install worked: a package that
+ * installs a library the workload cannot load is not an install.
+ */
+export function cudaRuntimeScript(aptDateCheckDisabled = false): string {
+  const aptOptions = aptDateCheckDisabled ? " -o Acquire::Check-Date=false" : "";
+  const packages = CUDA_RUNTIME_PACKAGES.join(" ");
+  return `set -eu
+if [ "$(id -u)" -ne 0 ]; then echo "guest provisioning must run as root" >&2; exit 1; fi
+command -v apt-get >/dev/null 2>&1 || { echo "apt-get is required in the guest" >&2; exit 1; }
+apt-get${aptOptions} update -qq
+# apt never fails on an empty repository: ${CUDA_RUNTIME_PACKAGE} lives in
+# multiverse, and a missing component shows up as "has no installation
+# candidate", which says nothing about the real cause. Name it here instead.
+if ! apt-cache policy ${CUDA_RUNTIME_PACKAGE} 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+  echo "no installation candidate for ${CUDA_RUNTIME_PACKAGE}; it is in the multiverse component," >&2
+  echo "which this image may not have enabled (see /etc/apt/sources.list.d/ and apt-get update)" >&2
+  exit 1
+fi
+DEBIAN_FRONTEND=noninteractive apt-get${aptOptions} install -y -qq ${packages}
+# Prove the exact library the workloads dlopen is loadable. This is a link-time
+# check only: it does not need a GPU, so a CPU-only worker can still be
+# provisioned and will fail at the device-specific probe instead.
+python3 -c 'import ctypes; ctypes.CDLL("${CUDA_RUNTIME_LIBRARY}"); print("${CUDA_RUNTIME_LIBRARY}")'
+`;
+}
+
 /**
  * The guest bus daemon and the modules it imports. The bus uses only Node
  * builtins, so this list is the entire dependency closure — no npm install and
@@ -212,6 +267,47 @@ export class GuestProvisioner {
     } catch (error) {
       throw new Error(
         `Guest Node cannot use node:sqlite: ${errorMessage(error, "command failed")}`
+      );
+    }
+  }
+
+  /**
+   * Installs the guest CUDA runtime (libcudart + python3).
+   *
+   * Required before a GPU allocation can run anything that links the runtime.
+   * The nvidia-smi smoke path does not need it; the CUDA workload does.
+   */
+  async installCudaRuntime(id: string): Promise<GuestCudaInstallResult> {
+    const reported = await this.execute(
+      id,
+      ["sh", "-c", cudaRuntimeScript(this.aptDateCheckDisabled)],
+      15 * 60_000
+    );
+    const installed = reported.trim().split("\n").at(-1)?.trim() ?? "";
+    if (installed !== CUDA_RUNTIME_LIBRARY) {
+      throw new Error(
+        `Guest CUDA install reported ${installed || "(no output)"}, ` +
+        `expected ${CUDA_RUNTIME_LIBRARY}`
+      );
+    }
+    return { packages: CUDA_RUNTIME_PACKAGES, library: CUDA_RUNTIME_LIBRARY };
+  }
+
+  /**
+   * Proves the guest can create a CUDA context, not merely load the library.
+   *
+   * This is the device-specific half: it needs the GPU device attached and a
+   * working driver, so it belongs after an attachment rather than after an
+   * install. A CPU-only worker is expected to fail here and say so.
+   */
+  async verifyCuda(id: string): Promise<void> {
+    try {
+      await this.execute(id, [
+        "python3", "-c", CUDA_PROBE_SOURCE, "1048576"
+      ], 60_000);
+    } catch (error) {
+      throw new Error(
+        `Guest cannot create a CUDA context: ${errorMessage(error, "probe failed")}`
       );
     }
   }

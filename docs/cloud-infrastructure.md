@@ -61,6 +61,18 @@ npm run cloud:dev
 
 The API listens on `127.0.0.1:4318`.
 
+### Several workers
+
+`SYNTRUM_WORKERS` takes a comma-separated `user@host` list. Each entry gets its own SSH runner, Incus driver and GPU agent, and each registers in the `workers` table. The first entry is the default a computer is created on; `POST /computers` may name any registered worker with `workerHost`, and an unknown one is a `400` rather than a container that exists only in the control plane's records.
+
+Every lifecycle operation then routes to the computer's **own** worker, including the desktop tunnel and the agent's `agentAccess` socket path. A fork stays on its source's worker, because `incus copy` reads that worker's disk — it cannot branch across hosts. `desktop_port` stays globally unique (not per worker) on purpose: the tunnel maps local port to the same remote port, so uniqueness is what keeps two open tunnels from colliding on the operator's machine.
+
+The first worker is required and fails loudly if unreachable. A later worker that is down is recorded as `unavailable` and does not stop the control plane; its computers fail with the driver's own error. A worker with no GPU at all is normal (an arm64 development box) and is skipped during inventory rather than failing discovery for the others.
+
+```sh
+export SYNTRUM_WORKERS=gokul@dev-worker,gokul@gpu.example.com
+```
+
 Examples:
 
 ```sh

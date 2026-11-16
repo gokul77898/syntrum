@@ -127,6 +127,7 @@ npm run mcp:stdio     # an MCP agent process
 | `npm run test:live-vscode` | **Live.** Real editor acceptance. |
 | `npm run test:live-antigravity` | **Live.** Real Antigravity acceptance. |
 | `npm run test:live-adapter` | **Live.** Extension host, opt in via `CLOUD_AI_OS_LIVE_VSCODE_TEST=1` |
+| `npm run test:live-gpu` | **Live.** Real GPU allocation: installs the guest CUDA runtime, attaches a GPU, runs one workload. Needs an NVIDIA worker. |
 
 Scripts marked **Live** mutate real infrastructure and are opt-in. They are never part of `npm test`.
 
@@ -138,8 +139,9 @@ The control plane reads SSH and worker settings from the environment. **No hostn
 
 | Variable | Meaning |
 |---|---|
-| `SYNTRUM_WORKER_SSH_HOST` | Worker host for live acceptance |
+| `SYNTRUM_WORKER_SSH_HOST` | Worker host (single-worker setup, and the default worker) |
 | `SYNTRUM_WORKER_SSH_USER` | SSH user on the worker |
+| `SYNTRUM_WORKERS` | Optional comma-separated `user@host` list to drive **several** workers. The first entry is the default a computer is created on, and `POST /computers` may name any registered worker with `workerHost`. Falls back to the pair above. |
 | `SYNTRUM_WORKER_SSH_KNOWN_HOSTS` | Path to a `known_hosts` file (host key verification is enforced) |
 | `SYNTRUM_WORKER_SSH_IDENTITY_FILE` | Path to an SSH private key |
 | `CLOUD_AI_OS_OPERATOR_TOKEN` | Operator bearer token, **≥ 32 characters**. Required to start the cloud API. |
@@ -230,7 +232,7 @@ Three rules the suite follows:
 - **Guest MCP runtime does not exist.** Agents currently drive the *host's* editor, not the guest's.
 - **`diskGb` is not enforced** (see the storage note above).
 - **A worker with a skewed clock** breaks `apt` and TLS. Not a SYNTRUM bug, but it will bite you.
-- **GPU paths are unexercised.** The GPU modules are written against an NVIDIA worker agent; the reference machine has no GPU.
+- **GPU paths are unexercised on real hardware.** The GPU modules are written against an NVIDIA worker agent and `npm run test:live-gpu` is the gate, but no NVIDIA box has been rented yet, so live CUDA remains `IMPLEMENTED BUT NOT VERIFIED`. `nvidia.runtime` is not a live-updatable Incus option, so the **first** GPU allocation on a computer restarts it to mount the host driver libraries; later allocations do not.
 
 ---
 

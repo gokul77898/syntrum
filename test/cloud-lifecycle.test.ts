@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
   CloudComputerService,
   CloudComputerStore,
   IncusWorkerDriver,
+  parseWorkerTargets,
   type CommandRunner,
   type ComputerSpec,
   type WorkerDriver
@@ -138,4 +142,113 @@ test("failed delete persists error and option remains persisted", async t => {
     assert.equal(error.code, "COMPUTER_DELETED");
     return true;
   });
+});
+
+// ── Multiple workers ─────────────────────────────────────────────────────
+
+/** Records which worker each lifecycle call landed on. */
+function recordingDriver(worker: string, calls: string[]): WorkerDriver {
+  const record = (operation: string) => { calls.push(`${worker}:${operation}`); };
+  return {
+    async create(spec) { record(`create:${spec.workerHost}`); },
+    async start() { record("start"); },
+    async stop() { record("stop"); },
+    async restart() { record("restart"); },
+    async inspect() { record("inspect"); return "running"; },
+    async destroy() { record("destroy"); },
+    async execute() { record("execute"); return ""; },
+    async fork() { record("fork"); }
+  };
+}
+
+function multiWorkerService(t: test.TestContext) {
+  const directory = mkdtempSync(join(tmpdir(), "syntrum-multiworker-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const calls: string[] = [];
+  const databasePath = join(directory, "cloud.sqlite");
+  const store = new CloudComputerStore(databasePath);
+  const service = new CloudComputerService({
+    store,
+    workerHost: "gokul@arm",
+    driver: recordingDriver("gokul@arm", calls),
+    drivers: new Map([
+      ["gokul@arm", recordingDriver("gokul@arm", calls)],
+      ["gokul@gpu", recordingDriver("gokul@gpu", calls)]
+    ])
+  });
+  t.after(() => service.close());
+  return { service, calls, databasePath };
+}
+
+test("a computer created on a named worker is driven by that worker", async t => {
+  const { service, calls } = multiWorkerService(t);
+  const computer = await service.create({ desktopEnabled: false, workerHost: "gokul@gpu" });
+  assert.equal(computer.workerHost, "gokul@gpu", "the row records the chosen worker");
+  assert.ok(calls.includes("gokul@gpu:create:gokul@gpu"), `landed on: ${calls.join(", ")}`);
+
+  // Every later operation must resolve to the same worker, not the default.
+  await service.stop(computer.id);
+  await service.destroy(computer.id);
+  assert.ok(calls.includes("gokul@gpu:stop"));
+  assert.ok(calls.includes("gokul@gpu:destroy"));
+  assert.equal(calls.some(call => call.startsWith("gokul@arm:stop")), false);
+});
+
+test("access reports the computer's own worker, not the default", async t => {
+  const { service } = multiWorkerService(t);
+  const computer = await service.create({ workerHost: "gokul@gpu" });
+  assert.match(service.access(computer.id).sshTunnelCommand, /gokul@gpu/);
+  assert.equal(service.agentAccess(computer.id).workerHost, "gokul@gpu");
+});
+
+test("an unknown worker is refused before any row or container exists", async t => {
+  const { service, calls } = multiWorkerService(t);
+  await expectCloudCode(
+    service.create({ desktopEnabled: false, workerHost: "someone@elsewhere" }),
+    "WORKER_NOT_REGISTERED"
+  );
+  assert.equal(service.list().length, 0, "nothing is recorded for a refused worker");
+  assert.equal(calls.length, 0, "no driver was ever reached");
+});
+
+test("a fork stays on its source's worker even if another exists", async t => {
+  const { service, calls } = multiWorkerService(t);
+  const source = await service.create({ desktopEnabled: false, workerHost: "gokul@gpu" });
+  await service.stop(source.id);
+  const fork = await service.fork(source.id);
+  assert.equal(fork.workerHost, "gokul@gpu");
+  assert.ok(calls.includes("gokul@gpu:fork"));
+});
+
+test("a computer on a worker with no driver is reported, not run elsewhere", async t => {
+  const { service, databasePath } = multiWorkerService(t);
+  const computer = await service.create({ desktopEnabled: false, workerHost: "gokul@gpu" });
+  // Simulate the row outliving its worker's registration (e.g. SYNTRUM_WORKERS
+  // was edited). Serving it on the default worker would be a wrong-host
+  // operation, so it must fail instead.
+  const lonely = new CloudComputerService({
+    store: new CloudComputerStore(databasePath),
+    workerHost: "gokul@arm",
+    driver: recordingDriver("gokul@arm", []),
+    drivers: new Map([["gokul@arm", recordingDriver("gokul@arm", [])]])
+  });
+  t.after(() => lonely.close());
+  await expectCloudCode(lonely.stop(computer.id), "WORKER_OPERATION_FAILED");
+});
+
+test("SYNTRUM_WORKERS parses a list, falls back to one worker, and rejects duplicates", () => {
+  assert.deepEqual(
+    parseWorkerTargets({ SYNTRUM_WORKERS: "gokul@arm, gokul@gpu" }),
+    [{ user: "gokul", host: "arm" }, { user: "gokul", host: "gpu" }]
+  );
+  assert.deepEqual(
+    parseWorkerTargets({ SYNTRUM_WORKER_SSH_USER: "gokul", SYNTRUM_WORKER_SSH_HOST: "worker.example" }),
+    [{ user: "gokul", host: "worker.example" }]
+  );
+  // One machine's computers routing to another's driver is refused outright.
+  assert.throws(
+    () => parseWorkerTargets({ SYNTRUM_WORKERS: "gokul@arm,gokul@arm" }),
+    /more than once/
+  );
+  assert.throws(() => parseWorkerTargets({ SYNTRUM_WORKERS: "not-a-host" }), /user@host/);
 });

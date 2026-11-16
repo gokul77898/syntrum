@@ -118,15 +118,29 @@ export function createBrowserUi({
         }
         const payload = await response.json() as {
           details?: { ipAddresses?: string[] };
-          computer?: { desktopPort?: number };
         };
         const host = payload.details?.ipAddresses?.find(address => !address.includes(":"));
-        const port = payload.computer?.desktopPort ??
-          (await desktopPort(base, operatorToken, id));
+        const record = await computerRecord(base, operatorToken, id);
+        const port = record.desktopPort;
         if (!host || !port) {
           throw new Error("The desktop has no reachable address yet");
         }
-        return { host, port };
+        // Absent only for a computer created before workers were recorded; the
+        // gateway then falls back to the configured single worker.
+        const target = splitWorkerHost(record.workerHost);
+        return {
+          host,
+          port,
+          ...(target
+            ? {
+                ssh: {
+                  ...target,
+                  knownHostsPath: workerKnownHostsPath,
+                  identityFile: workerIdentityFile
+                }
+              }
+            : {})
+        };
       }
     });
   }
@@ -167,18 +181,38 @@ export function createBrowserUi({
 
 // The desktop port is part of the computer record; details() does not repeat
 // it, so it is read from the same control-plane object the UI already uses.
-async function desktopPort(
+// The worker comes from the same fetch: which host to jump through is a
+// property of the computer, not of this process's configuration, so a desktop
+// on a second worker is still reached through the worker that holds it.
+
+// The worker comes from the same fetch: which host to jump through is a
+// property of the computer, not of this process's configuration, so a desktop
+// on a second worker is still reached through the worker that holds it.
+async function computerRecord(
   base: string,
   operatorToken: string,
   id: string
-): Promise<number | undefined> {
+): Promise<{ desktopPort?: number; workerHost?: string }> {
   const response = await fetch(`${base}/computers/${encodeURIComponent(id)}`, {
     headers: { authorization: `Bearer ${operatorToken}` },
     signal: AbortSignal.timeout(4000)
   });
-  if (!response.ok) return undefined;
-  const payload = await response.json() as { computer?: { desktopPort?: number } };
-  return payload.computer?.desktopPort;
+  if (!response.ok) return {};
+  const payload = await response.json() as {
+    computer?: { desktopPort?: number; workerHost?: string };
+  };
+  return payload.computer ?? {};
+}
+
+/** `user@host` into its parts, sharing one rule with the option parsing above. */
+function splitWorkerHost(workerHost?: string): { user: string; host: string } | undefined {
+  if (!workerHost) return undefined;
+  const separator = workerHost.lastIndexOf("@");
+  if (separator <= 0 || separator === workerHost.length - 1) return undefined;
+  return {
+    user: workerHost.slice(0, separator),
+    host: workerHost.slice(separator + 1)
+  };
 }
 
 async function route(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {

@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CUDA_RUNTIME_PACKAGES,
   GuestProvisioner,
+  cudaRuntimeScript,
   nodeInstallScript,
   resolveNodePlatform
 } from "../src/cloud/index.js";
+import { CUDA_RUNTIME_LIBRARY } from "../src/gpu/types.js";
 
 test("guest architecture maps to the platform Node publishes", () => {
   assert.equal(resolveNodePlatform("aarch64"), "linux-arm64");
@@ -107,4 +110,71 @@ test("verifyNodeSqlite surfaces a runtime that cannot load node:sqlite", async (
 
   const ok = new GuestProvisioner(async () => "");
   await ok.verifyNodeSqlite("computer-1");
+});
+
+// ── CUDA runtime ─────────────────────────────────────────────────────────
+
+// The bug this exists for: the workload asked for libcudart.so.1, which no
+// Ubuntu 24.04 package provides, so a perfectly built GPU guest failed to
+// dlopen. The soname the workload uses and the soname the provisioner proves
+// must be the same string.
+test("the CUDA runtime script proves the exact library the workload loads", () => {
+  const script = cudaRuntimeScript();
+  assert.match(script, new RegExp(`ctypes\\.CDLL\\("${CUDA_RUNTIME_LIBRARY.replace(/\./g, "\\.")}"\\)`));
+  // The workload's own constant, so the two cannot drift apart.
+  assert.match(script, /libcudart\.so\.12/);
+  assert.equal(script.includes("libcudart.so.1\""), false, "the .so.1 soname does not exist");
+});
+
+test("the CUDA runtime script installs the package and the interpreter the workload needs", () => {
+  const script = cudaRuntimeScript();
+  assert.ok(CUDA_RUNTIME_PACKAGES.includes("libcudart12"));
+  assert.ok(CUDA_RUNTIME_PACKAGES.includes("python3"));
+  assert.match(script, /apt-get.*install[^\n]*libcudart12/);
+  assert.match(script, /apt-get.*install[^\n]*python3/);
+  // The workload is Python; a guest without it fails in a way that looks like a
+  // CUDA problem rather than a missing interpreter.
+  assert.ok(script.indexOf("libcudart12") < script.lastIndexOf("ctypes.CDLL"));
+});
+
+// libcudart12 is in multiverse, which a minimal image may not have enabled.
+// apt reports that as "no installation candidate", which names nothing useful.
+test("a missing package names multiverse instead of apt's generic failure", () => {
+  const script = cudaRuntimeScript();
+  assert.match(script, /apt-cache policy libcudart12/);
+  assert.match(script, /multiverse/);
+  assert.ok(
+    script.indexOf("apt-cache policy") < script.lastIndexOf("apt-get"),
+    "the candidate check must run before the install it explains"
+  );
+});
+
+test("the CUDA install is opt-in for the apt date override, like the Node path", () => {
+  assert.equal(cudaRuntimeScript().includes("Check-Date"), false);
+  assert.match(cudaRuntimeScript(true), /Check-Date=false/);
+});
+
+test("installCudaRuntime reports the library it proved, and fails on anything else", async () => {
+  const provisioner = new GuestProvisioner(async () => `${CUDA_RUNTIME_LIBRARY}\n`);
+  assert.deepEqual(await provisioner.installCudaRuntime("computer-1"), {
+    packages: CUDA_RUNTIME_PACKAGES,
+    library: CUDA_RUNTIME_LIBRARY
+  });
+
+  // A guest whose install silently did nothing must not be reported as ready.
+  const silent = new GuestProvisioner(async () => "");
+  await assert.rejects(silent.installCudaRuntime("computer-1"), /expected libcudart\.so\.12/);
+});
+
+test("verifyCuda needs a device, and says so rather than swallowing the failure", async () => {
+  const noGpu = new GuestProvisioner(async () => {
+    throw new Error("CUDA error 100: no CUDA-capable device is detected");
+  });
+  await assert.rejects(
+    noGpu.verifyCuda("computer-1"),
+    /cannot create a CUDA context.*no CUDA-capable device/
+  );
+
+  const working = new GuestProvisioner(async () => "syntrum-cuda-ready\n");
+  await working.verifyCuda("computer-1");
 });

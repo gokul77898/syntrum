@@ -19,7 +19,17 @@ const MAX_HEADER_BYTES = 64 * 1024;
 const MAX_ASSET_BYTES = 4 * 1024 * 1024;
 const UPSTREAM_TIMEOUT_MS = 20_000;
 
-export type DesktopTarget = { host: string; port: number };
+export type DesktopTarget = {
+  host: string;
+  port: number;
+  /**
+   * The worker to jump through for this guest. The guest address alone is not
+   * enough once more than one worker exists: `ssh -W <guest>` only reaches a
+   * guest that the named worker can see, so a desktop on a second worker fails
+   * (or, on a flat LAN, silently connects through the wrong host).
+   */
+  ssh?: DesktopSshOptions;
+};
 
 export type DesktopSshOptions = {
   host: string;
@@ -109,7 +119,7 @@ export class DesktopGateway {
       return;
     }
 
-    const child = spawn("ssh", sshArgs(this.options.ssh, target), {
+    const child = spawn("ssh", sshArgs(target.ssh ?? this.options.ssh, target), {
       stdio: ["pipe", "pipe", "pipe"]
     });
     let settled = false;
@@ -197,7 +207,7 @@ export class DesktopGateway {
     req: IncomingMessage
   ): Promise<{ status: number; headers: [string, string][]; body: Buffer }> {
     return new Promise((resolve, reject) => {
-      const child = spawn("ssh", sshArgs(this.options.ssh, target), {
+      const child = spawn("ssh", sshArgs(target.ssh ?? this.options.ssh, target), {
         stdio: ["pipe", "pipe", "pipe"]
       });
       const chunks: Buffer[] = [];

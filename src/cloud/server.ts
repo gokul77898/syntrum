@@ -155,7 +155,18 @@ async function handle(
     }
     if (method === "POST") {
       const body = await readJson(req);
-      respond(res, 201, { computer: await options.service.create(body, caller) });
+      respond(res, 201, {
+        computer: await options.service.create({
+          cpu: body.cpu as number | undefined,
+          memoryMb: body.memoryMb as number | undefined,
+          diskGb: body.diskGb as number | undefined,
+          desktopEnabled: body.desktopEnabled as boolean | undefined,
+          // Validated inside the service against the registered workers, so an
+          // unknown host is a 400 rather than a container that exists only in
+          // the control plane's records.
+          workerHost: body.workerHost as string | undefined
+        }, caller)
+      });
       return;
     }
   }
@@ -311,40 +322,102 @@ function requiredEnvironment(name: string): string {
   return value;
 }
 
-async function main(): Promise<void> {
-  const host = requiredEnvironment("SYNTRUM_WORKER_SSH_HOST");
-  const user = requiredEnvironment("SYNTRUM_WORKER_SSH_USER");
-  const run = createSshCommandRunner({
-    host,
-    user,
-    knownHostsPath: process.env.SYNTRUM_WORKER_SSH_KNOWN_HOSTS,
-    identityFile: process.env.SYNTRUM_WORKER_SSH_IDENTITY_FILE
+export type WorkerTarget = { user: string; host: string };
+
+/**
+ * The workers this control plane drives, as `user@host`.
+ *
+ * `SYNTRUM_WORKERS` is a comma-separated list; the older single-worker pair is
+ * the fallback, so every existing deployment and acceptance harness keeps
+ * working unchanged. The list is validated, not trusted: these values become
+ * an SSH destination and a map key for every computer on that worker.
+ */
+export function parseWorkerTargets(env: NodeJS.ProcessEnv = process.env): WorkerTarget[] {
+  const listed = (env.SYNTRUM_WORKERS ?? "")
+    .split(",")
+    .map(entry => entry.trim())
+    .filter(entry => entry.length > 0);
+  const raw = listed.length > 0
+    ? listed
+    : [`${env.SYNTRUM_WORKER_SSH_USER ?? ""}@${env.SYNTRUM_WORKER_SSH_HOST ?? ""}`];
+
+  const targets = raw.map(entry => {
+    const separator = entry.lastIndexOf("@");
+    const user = separator > 0 ? entry.slice(0, separator) : "";
+    const host = separator > 0 ? entry.slice(separator + 1) : "";
+    if (!user || !host) {
+      throw new Error(`Worker must be in user@host form: ${entry}`);
+    }
+    return { user, host };
   });
+  // A duplicate host would make one machine's computers route to the other's
+  // driver, so it is refused rather than silently collapsed.
+  const hosts = new Set(targets.map(target => `${target.user}@${target.host}`));
+  if (hosts.size !== targets.length) {
+    throw new Error("SYNTRUM_WORKERS lists the same worker more than once");
+  }
+  return targets;
+}
+
+async function main(): Promise<void> {
+  const targets = parseWorkerTargets();
+  const knownHostsPath = process.env.SYNTRUM_WORKER_SSH_KNOWN_HOSTS;
+  const identityFile = process.env.SYNTRUM_WORKER_SSH_IDENTITY_FILE;
   // The worker clock is skewed on some deployments, which makes apt reject its
   // own Release files. This override is opt-in and relaxes only the date check.
   const aptConf = process.env.SYNTRUM_WORKER_APT_CONF;
-  const driver = new IncusWorkerDriver(
-    run,
-    undefined,
-    undefined,
-    aptConf
-  );
-  const workerHost = `${user}@${host}`;
   const databasePath = process.env.CLOUD_AI_OS_DB_PATH ?? resolve(process.cwd(), "data/cloud.sqlite");
+  const workerStore = new WorkerStore(databasePath);
+
+  const drivers = new Map<string, IncusWorkerDriver>();
+  const gpuAgents = new Map<string, NvidiaWorkerAgent>();
+  for (const target of targets) {
+    const run = createSshCommandRunner({
+      host: target.host,
+      user: target.user,
+      knownHostsPath,
+      identityFile
+    });
+    const workerHost = `${target.user}@${target.host}`;
+    drivers.set(workerHost, new IncusWorkerDriver(run, undefined, undefined, aptConf));
+    gpuAgents.set(workerHost, new NvidiaWorkerAgent(run));
+    try {
+      workerStore.register(await checkWorkerHealth(run, target.host, target.user));
+    } catch (error) {
+      // The first worker is the default and is required: starting without it
+      // would serve a control plane whose computers can never be created, which
+      // is a broken configuration rather than a degraded one, so it still fails
+      // loudly. A later worker that is briefly down must not take the default
+      // worker's computers with it, so it is recorded as unavailable and its
+      // computers fail with the driver's own error — the honest report.
+      if (target === targets[0]) throw error;
+      const now = new Date().toISOString();
+      workerStore.register({
+        id: workerHost,
+        host: target.host,
+        sshUser: target.user,
+        architecture: "unknown",
+        incusVersion: "unknown",
+        status: "unavailable",
+        lastSeenAt: now,
+        createdAt: now
+      });
+      console.warn(
+        `Worker ${workerHost} is unavailable: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  const defaultWorker = `${targets[0].user}@${targets[0].host}`;
   const store = new CloudComputerStore(databasePath);
   const service = new CloudComputerService({
     store,
-    driver,
-    workerHost,
+    driver: drivers.get(defaultWorker)!,
+    drivers,
+    workerHost: defaultWorker,
     desktopEnabled: process.env.SYNTRUM_DESKTOP_ENABLED !== "false"
   });
-  const workerStore = new WorkerStore(databasePath);
-  workerStore.register(await checkWorkerHealth(run, host, user));
-  const gpuScheduler = new GpuScheduler(
-    new GpuStore(databasePath),
-    store,
-    new Map([[workerHost, new NvidiaWorkerAgent(run)]])
-  );
+  const gpuScheduler = new GpuScheduler(new GpuStore(databasePath), store, gpuAgents);
   await service.reconcile();
   await gpuScheduler.recover();
   const server = createCloudHttpServer({

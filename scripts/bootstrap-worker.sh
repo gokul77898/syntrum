@@ -120,6 +120,17 @@ if [ "${SYNTRUM_GPU}" = "yes" ]; then
     # sets nvidia.runtime=true.
     ldconfig
     log "GPU check: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1)"
+
+    # libcudart is a *guest* userspace library, not a host one: the host only
+    # supplies the driver. SYNTRUM installs it per guest (GuestProvisioner.
+    # installCudaRuntime), and it comes from multiverse — which a minimal cloud
+    # image does not always enable, and apt then reports the unhelpful "has no
+    # installation candidate". Flag it here, while the box is cheap to fix.
+    if ! apt-cache policy libcudart12 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+      warn "This host's apt has no candidate for libcudart12, so guests created here will"
+      warn "fail their CUDA preflight. It lives in the multiverse component; check that"
+      warn "/etc/apt/sources.list.d/ enables it (grep -r multiverse /etc/apt/sources.list*)."
+    fi
   fi
 else
   log "Skipping GPU setup (SYNTRUM_GPU=${SYNTRUM_GPU})"
@@ -185,7 +196,10 @@ if [ -n "${SYNTRUM_CONTROL_PLANE}" ] && [ -n "${SYNTRUM_OPERATOR_TOKEN}" ]; then
   log "Registering with ${SYNTRUM_CONTROL_PLANE}"
   # A worker registers by being reachable and healthy; the control plane records
   # it when it next checks health. This call is informational and must not fail
-  # the bootstrap.
+  # the bootstrap. Note this is only a reachability check: the control plane
+  # still has to be told about this host, by adding it to SYNTRUM_WORKERS (or as
+  # the single SYNTRUM_WORKER_SSH_HOST). Nothing here registers the worker's SSH
+  # destination on its behalf.
   if curl -fsS --max-time 15 \
       -H "authorization: Bearer ${SYNTRUM_OPERATOR_TOKEN}" \
       "${SYNTRUM_CONTROL_PLANE%/}/health" >/dev/null; then
@@ -203,6 +217,8 @@ cat <<EOF
 Next:
   1. Point the control plane at this box:
        SYNTRUM_WORKER_SSH_HOST=<this host>  SYNTRUM_WORKER_SSH_USER=${SYNTRUM_USER}  npm run cloud:dev
+     For more than one worker, list them instead (first entry is the default):
+       SYNTRUM_WORKERS=${SYNTRUM_USER}@<this host>,<user>@<other host>  npm run cloud:dev
   2. Provision without a desktop first (faster, and proves the worker):
        curl -X POST -H "authorization: Bearer \$TOKEN" -H 'content-type: application/json' \\
          -d '{"cpu":2,"memoryMb":4096,"diskGb":20,"desktopEnabled":false}' \\

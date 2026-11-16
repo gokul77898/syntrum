@@ -15,6 +15,19 @@ The `src/gpu/` subsystem contains an actual worker execution path, not just allo
 
 The workload API accepts no arbitrary shell command. The CUDA workload allocates and writes real GPU memory when run on compatible hardware.
 
+## Guest CUDA runtime
+
+Two separate things have to be true inside a guest before a CUDA workload runs, and they come from different places:
+
+- **Driver libraries** are mounted by the host through Incus, via `nvidia.runtime=true`. They are not installed in the guest.
+- **The CUDA Runtime** (`libcudart`) is a userspace library that must exist *inside* the guest. `GuestProvisioner.installCudaRuntime()` installs it together with `python3` (the fixed workload is a Python program using `ctypes`).
+
+The library name matters and was wrong: Ubuntu 24.04's only CUDA Runtime package is `libcudart12` (multiverse), which ships `libcudart.so.12` and **nothing named `libcudart.so.1`**. The workload and the provisioner both read `CUDA_RUNTIME_LIBRARY` from `src/gpu/types.ts`, so the soname cannot drift again.
+
+`nvidia.runtime` is documented as **not** a live-updatable option, so setting it on a running container attaches a device without the userspace libraries — the exact driver/library mismatch the option exists to prevent. The attachment therefore runs in one order: set `nvidia.runtime`, add the GPU device (and the MPS pipe mount), and then restart **only if the option was not already set**. A single start applies both the libraries and the device; the option is left set afterwards so later allocations read it back and skip the restart, and the restart happens at most once per computer. It does interrupt an open desktop session once; the guest's own `syntrum-*` units bring the desktop back when the container starts.
+
+Before the workload starts, the agent proves inside the guest that `libcudart` loads and a context can be created. A guest without the runtime is refused with a message naming `installCudaRuntime`, rather than failing mid-run with an opaque CUDA error.
+
 ## Scheduling semantics and limitations
 
 ### Conservative memory accounting
@@ -39,14 +52,16 @@ GPU passthrough makes a device visible to the container; it does not create VRAM
 
 ## Live acceptance requirements
 
-No NVIDIA worker is configured, so real GPU utilization, memory behavior, concurrent guest execution, capacity rejection on hardware, release, and restart recovery are `IMPLEMENTED BUT NOT VERIFIED`.
+No NVIDIA worker is configured, so real GPU utilization, memory behavior, concurrent guest execution, capacity rejection on hardware, release, restart recovery, and the guest CUDA runtime installation are `IMPLEMENTED BUT NOT VERIFIED`.
+
+`npm run test:live-gpu` is the gate. It installs the guest CUDA runtime, runs one allocation through the real scheduler, records `nvidia-smi` output from inside the guest, and deletes everything it creates. It refuses early with `BLOCKED_NO_NVIDIA_HARDWARE` when the worker has no working driver, so it cannot idly burn rental time.
 
 Required:
 
 - Remote Ubuntu 24.04 x86-64 worker with SSH/Incus configured as in `docs/cloud-infrastructure.md`.
-- NVIDIA GPU supported by `nvidia-smi`, its driver, and CUDA Runtime (`libcudart.so.1`).
+- NVIDIA GPU supported by `nvidia-smi`, its driver, and CUDA Runtime (`libcudart12`, from multiverse).
 - Incus GPU-passthrough permissions and matching host/guest driver compatibility.
-- Python 3 in the guest for the fixed CUDA workload.
+- Python 3 in the guest for the fixed CUDA workload (installed with the runtime).
 - MPS-capable hardware/software for MPS tests; supported A100/H100-class hardware and pre-created partitions for MIG tests.
 
 Indicative infrastructure cost, not a provider quote: a small T4/L4-class cloud worker is commonly $150–$400/month on demand. MIG-capable instances cost substantially more. Use a short-lived acceptance worker to control cost.

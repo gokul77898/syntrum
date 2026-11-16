@@ -23,7 +23,12 @@ export class GpuScheduler {
 
   async refreshInventory(): Promise<GpuDevice[]> {
     for (const [workerHost, agent] of this.agents) {
-      const devices = await agent.discover();
+      // A worker with no GPU at all is a normal fleet member (an arm64 dev box,
+      // say), and `nvidia-smi` failing there must not fail discovery for every
+      // other worker — one CPU-only worker would otherwise make /gpus error and
+      // every allocation fail, including on the GPU worker that would have
+      // served it.
+      const devices = await agent.discover().catch(() => []);
       for (const device of devices) {
         this.store.upsertDevice({ ...device, workerHost });
       }
