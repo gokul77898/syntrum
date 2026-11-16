@@ -64,7 +64,17 @@ export interface WorkerDriver {
   // Optional because a worker without desktop support has nothing to verify.
   verifyDesktop?(id: string): Promise<void>;
   execute?(id: string, args: readonly string[], timeoutMs?: number): Promise<string>;
+  // Branching a computer: the target is a full copy of the source's disk.
+  fork?(sourceId: string, targetId: string): Promise<void>;
 }
+
+/** A fork request, before the service assigns an id and a port. */
+export type ForkComputerInput = {
+  cpu?: number;
+  memoryMb?: number;
+  diskGb?: number;
+  desktopEnabled?: boolean;
+};
 
 export type CommandRunner = (
   args: readonly string[],

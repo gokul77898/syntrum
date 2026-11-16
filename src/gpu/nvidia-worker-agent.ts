@@ -30,6 +30,14 @@ function deviceName(gpuUuid: string): string {
   return `gpu${gpuUuid.replaceAll("-", "").slice(0, 12)}`;
 }
 
+// The MPS control daemon's pipe directory on the host. Mounted into the
+// container so several containers can share one CUDA context through MPS.
+const MPS_PIPE_DIRECTORY = "/tmp/nvidia-mps";
+
+function mpsPipeDeviceName(gpuUuid: string): string {
+  return `mps-pipe-${gpuUuid.replaceAll("-", "").slice(0, 12)}`;
+}
+
 export class NvidiaWorkerAgent implements GpuWorkerAgent {
   constructor(private readonly run: CommandRunner) {}
 
@@ -65,10 +73,25 @@ export class NvidiaWorkerAgent implements GpuWorkerAgent {
     if (allocation.mode === "mps") {
       await this.run(["nvidia-cuda-mps-control", "-d"]);
     }
+    // nvidia.runtime: without it Incus does not bind the host's NVIDIA
+    // userspace libraries and nvidia-smi into the guest, so every CUDA call
+    // fails on driver/library version mismatch even with the device attached.
+    await this.incus([
+      "config", "set", allocation.computerId, "nvidia.runtime=true"
+    ]);
     await this.incus([
       "config", "device", "add", allocation.computerId,
       deviceName(allocation.gpuUuid), "gpu", `id=${await this.gpuIndex(allocation.gpuUuid)}`
     ]);
+    if (allocation.mode === "mps") {
+      // MPS clients reach the control daemon through its pipe directory, so it
+      // must be visible inside the container and named in the environment.
+      await this.incus([
+        "config", "device", "add", allocation.computerId,
+        mpsPipeDeviceName(allocation.gpuUuid), "disk",
+        `source=${MPS_PIPE_DIRECTORY}`, "path=/tmp/nvidia-mps"
+      ]);
+    }
     if (allocation.workload === "nvidia-smi") {
       await this.incus(["exec", allocation.computerId, "--", "nvidia-smi"]);
       return;
@@ -77,7 +100,10 @@ export class NvidiaWorkerAgent implements GpuWorkerAgent {
     const environment = [
       "CUDA_VISIBLE_DEVICES=0",
       ...(allocation.mode === "mps"
-        ? [`CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=${allocation.computePercent}`]
+        ? [
+            `CUDA_MPS_PIPE_DIRECTORY=${MPS_PIPE_DIRECTORY}`,
+            `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=${allocation.computePercent}`
+          ]
         : [])
     ];
     await this.incus([
@@ -94,6 +120,13 @@ export class NvidiaWorkerAgent implements GpuWorkerAgent {
       "config", "device", "remove", allocation.computerId,
       deviceName(allocation.gpuUuid)
     ]);
+    if (allocation.mode === "mps") {
+      // Best-effort: the container may already be gone when releasing.
+      await this.incus([
+        "config", "device", "remove", allocation.computerId,
+        mpsPipeDeviceName(allocation.gpuUuid)
+      ]).catch(() => undefined);
+    }
   }
 
   async measure(gpuUuid: string): Promise<GpuMetric> {

@@ -14,6 +14,41 @@ export type WorkerRegistration = {
   createdAt: string;
 };
 
+/**
+ * Whether this worker's clock is far enough from real time to break apt.
+ *
+ * `Acquire::Check-Date=false` disables apt's check that a Release file is not
+ * future-dated. That check is also part of how a stale or replayed repository
+ * index is caught, so it must not be applied to a worker whose clock is fine —
+ * an x86_64 cloud image syncs its clock and does not need it.
+ *
+ * The tolerance is generous: a few minutes of drift is ordinary NTP skew and
+ * does not trip apt. Minutes, not seconds, is the unit that matters here.
+ */
+export function clockNeedsAptOverride(
+  workerEpochSeconds: number,
+  nowEpochSeconds: number = Math.floor(Date.now() / 1000)
+): boolean {
+  if (!Number.isFinite(workerEpochSeconds)) {
+    return false;
+  }
+  return Math.abs(nowEpochSeconds - workerEpochSeconds) > 300;
+}
+
+/** Reads the worker's clock, in seconds since the epoch. */
+export async function workerClockOffset(
+  run: CommandRunner
+): Promise<boolean> {
+  try {
+    const reported = Number((await run(["date", "+%s"])).trim());
+    return clockNeedsAptOverride(reported);
+  } catch {
+    // Unreadable clock is not evidence of drift; failing closed here would
+    // enable a security relaxation on a guess.
+    return false;
+  }
+}
+
 export async function checkWorkerHealth(
   run: CommandRunner,
   host: string,

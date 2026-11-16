@@ -160,9 +160,23 @@ async function handle(
     }
   }
 
-  const match = pathname.match(/^\/computers\/([^/]+)(?:\/(start|stop|restart|access|details|exec))?$/);
+  const match = pathname.match(/^\/computers\/([^/]+)(?:\/(start|stop|restart|access|details|exec|fork))?$/);
   if (match) {
     const [, id, operation] = match;
+    if (operation === "fork" && method === "POST") {
+      const body = await readJson(req);
+      // Only the sizing fields are read; the id, port and owner are assigned
+      // from the source and the caller, never from the request body.
+      respond(res, 201, {
+        computer: await options.service.fork(id, {
+          cpu: body.cpu as number | undefined,
+          memoryMb: body.memoryMb as number | undefined,
+          diskGb: body.diskGb as number | undefined,
+          desktopEnabled: body.desktopEnabled as boolean | undefined
+        }, caller)
+      });
+      return;
+    }
     if (operation === "access" && method === "GET") {
       respond(res, 200, options.service.access(id, caller));
       return;

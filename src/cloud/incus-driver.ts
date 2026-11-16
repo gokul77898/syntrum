@@ -12,6 +12,9 @@ import type {
 const DEFAULT_IMAGE = "images:ubuntu/24.04/cloud";
 const DEFAULT_STORAGE_POOL = "default";
 const CLOUD_INIT_TIMEOUT_MS = 20 * 60_000;
+// `incus copy` duplicates the whole root filesystem, which is far larger than
+// any single command's timeout allows for.
+const COPY_TIMEOUT_MS = 20 * 60_000;
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -413,6 +416,14 @@ export class IncusWorkerDriver implements WorkerDriver {
 
   async restart(id: string): Promise<void> {
     await this.run(["restart", id], 120_000);
+  }
+
+  // Workspace branching: a copy of a stopped container carries the whole root
+  // filesystem, so /workspace state forks with it. Instance-only, by design —
+  // copying the storage volume as well would double disk use per fork.
+  async fork(sourceId: string, targetId: string): Promise<void> {
+    await this.run(["copy", sourceId, targetId], COPY_TIMEOUT_MS);
+    await this.run(["start", targetId], 120_000);
   }
 
   async destroy(spec: Pick<ComputerSpec, "id" | "storageVolume">): Promise<void> {

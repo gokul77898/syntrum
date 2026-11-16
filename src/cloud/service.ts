@@ -7,6 +7,7 @@ import {
   type CloudComputer,
   type ComputerSpec,
   type CreateComputerInput,
+  type ForkComputerInput,
   type WorkerDriver
 } from "./types.js";
 
@@ -73,16 +74,7 @@ export class CloudComputerService {
 
     // The limit comes from the account record, never from the request, so a
     // caller cannot raise their own ceiling.
-    if (caller.kind === "account") {
-      if (caller.account.status !== "active") {
-        throw new CloudError(403, "ACCOUNT_DISABLED", "This account is disabled");
-      }
-      const limit = this.accountComputerLimit ?? caller.account.maxComputers;
-      const existing = this.store.list({ ownerId: caller.account.id }).length;
-      if (existing >= limit) {
-        throw new CloudError(429, "COMPUTER_LIMIT_REACHED", `Account limit of ${limit} computers reached`);
-      }
-    }
+    this.assertCreateQuota(caller, input);
 
     const now = new Date().toISOString();
     const desktopEnabled = this.desktopEnabled && input.desktopEnabled !== false;
@@ -164,6 +156,65 @@ export class CloudComputerService {
     return this.driver.inspectDetails(id);
   }
 
+  /**
+   * Branches a computer: the target is a full copy of the source's disk, which
+   * is what makes it useful for trying a risky change and throwing it away.
+   *
+   * The source must be stopped first — Incus cannot copy a running instance
+   * without a snapshot, and a snapshot of a moving filesystem is not a
+   * faithful branch of the workspace.
+   */
+  async fork(sourceId: string, input: ForkComputerInput = {}, caller: Caller = OPERATOR): Promise<CloudComputer> {
+    this.validateId(sourceId);
+    if (!this.driver.fork) {
+      throw new CloudError(501, "FORK_NOT_SUPPORTED", "Worker does not support forking computers");
+    }
+    const source = this.requireAccess(sourceId, caller);
+    if (source.status !== "stopped") {
+      throw new CloudError(
+        409,
+        "SOURCE_NOT_STOPPED",
+        `Stop the computer before forking it; it is ${source.status}`
+      );
+    }
+    this.assertCreateQuota(caller, input);
+
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const spec: ComputerSpec = {
+      id,
+      workerHost: source.workerHost,
+      image: source.image,
+      cpu: input.cpu ?? source.cpu,
+      memoryMb: input.memoryMb ?? source.memoryMb,
+      diskGb: input.diskGb ?? source.diskGb,
+      // A fork gets its own volume name; `incus copy` already carries the root
+      // filesystem, so the source's workspace volume is not double-attached.
+      storageVolume: `syntrum-workspace-${id}`,
+      desktopPort: this.store.nextDesktopPort(),
+      desktopEnabled: input.desktopEnabled ?? source.desktopEnabled
+    };
+    this.store.insert({
+      ...spec,
+      desktopEnabled: spec.desktopEnabled ?? true,
+      ...(source.ownerId ? { ownerId: source.ownerId } : {}),
+      status: "provisioning",
+      createdAt: now,
+      updatedAt: now
+    });
+    return this.runExclusive(id, async () => {
+      try {
+        // A fork replaces the container's own storage: the copied root
+        // filesystem already holds everything, so no new volume is created.
+        await this.driver.fork!(sourceId, id);
+        return this.store.updateStatus(id, "running");
+      } catch (error) {
+        this.store.updateStatus(id, "error", this.message(error));
+        throw new CloudError(502, "WORKER_FORK_FAILED", this.message(error), { computerId: id });
+      }
+    });
+  }
+
   execute(id: string, args: readonly string[], timeoutMs?: number, caller: Caller = OPERATOR): Promise<string> {
     this.validateId(id);
     if (this.requireAccess(id, caller).status !== "running") {
@@ -235,6 +286,30 @@ export class CloudComputerService {
         throw new CloudError(502, "WORKER_OPERATION_FAILED", this.message(error));
       }
     });
+  }
+
+  /**
+   * A new computer (created or forked) spends the owner's quota. Read from the
+   * account record, never from the request, so a caller cannot raise their own
+   * ceiling.
+   */
+  private assertCreateQuota(caller: Caller, input: CreateComputerInput | ForkComputerInput): void {
+    void input;
+    if (caller.kind !== "account") {
+      return;
+    }
+    if (caller.account.status !== "active") {
+      throw new CloudError(403, "ACCOUNT_DISABLED", "This account is disabled");
+    }
+    const limit = this.accountComputerLimit ?? caller.account.maxComputers;
+    const existing = this.store.list({ ownerId: caller.account.id }).length;
+    if (existing >= limit) {
+      throw new CloudError(
+        429,
+        "COMPUTER_LIMIT_REACHED",
+        `Account limit of ${limit} computers reached`
+      );
+    }
   }
 
   private runExclusive<T>(id: string, operation: () => Promise<T>): Promise<T> {

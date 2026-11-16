@@ -21,7 +21,21 @@ const PLATFORM_BY_MACHINE: Record<string, string> = {
 // Shared libraries Node's Linux builds link against that a minimal image does
 // not ship. libatomic.so.1 is the arm64 blocker observed live: without it node
 // exists on disk but cannot exec ("error while loading shared libraries").
-const NODE_RUNTIME_PACKAGES = ["libatomic1", "ca-certificates"] as const;
+// x86_64 links no separate libatomic, so it is requested only for arm64 —
+// asking for it unconditionally would fail the install if a future image drops
+// the package from an x86_64 archive.
+const NODE_RUNTIME_PACKAGES: Record<string, readonly string[]> = {
+  "linux-arm64": ["libatomic1", "ca-certificates"],
+  "linux-x64": ["ca-certificates"]
+};
+
+export function nodeRuntimePackages(platform: string): readonly string[] {
+  const packages = NODE_RUNTIME_PACKAGES[platform];
+  if (!packages) {
+    throw new Error(`No runtime packages known for platform: ${platform}`);
+  }
+  return packages;
+}
 
 export type GuestExecutor = (
   id: string,
@@ -54,6 +68,7 @@ export function nodeInstallScript(
   const installRoot = "/usr/local/lib/nodejs";
   const extracted = `${installRoot}/${archive.replace(/\.tar\.xz$/, "")}`;
   const aptOptions = aptDateCheckDisabled ? " -o Acquire::Check-Date=false" : "";
+  const packages = nodeRuntimePackages(platform).join(" ");
   return `set -eu
 if [ "$(id -u)" -ne 0 ]; then echo "guest provisioning must run as root" >&2; exit 1; fi
 command -v curl >/dev/null 2>&1 || { echo "curl is required in the guest" >&2; exit 1; }
@@ -63,7 +78,7 @@ command -v xz >/dev/null 2>&1 || { echo "xz-utils is required in the guest" >&2;
 # without this leaves a node that cannot exec at all.
 if command -v apt-get >/dev/null 2>&1; then
   apt-get${aptOptions} update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get${aptOptions} install -y -qq ${NODE_RUNTIME_PACKAGES.join(" ")}
+  DEBIAN_FRONTEND=noninteractive apt-get${aptOptions} install -y -qq ${packages}
 fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
