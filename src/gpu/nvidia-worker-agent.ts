@@ -39,6 +39,30 @@ function mpsPipeDeviceName(gpuUuid: string): string {
   return `mps-pipe-${gpuUuid.replaceAll("-", "").slice(0, 12)}`;
 }
 
+// A restricted Incus project blocks gpu devices by default
+// (`restricted.devices.gpu` defaults to `block`), and the raw Incus message
+// names neither the project nor the key that has to change. This is the same
+// class of denial the desktop path has always tolerated for proxy devices; here
+// it is fatal to the allocation, so it is translated into the one line an
+// operator holding a rented box actually needs.
+const GPU_DEVICE_FORBIDDEN = /gpu devices are forbidden/i;
+
+function gpuDeviceError(error: unknown, computerId: string): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  if (GPU_DEVICE_FORBIDDEN.test(message)) {
+    return new Error(
+      `This worker's Incus project forbids gpu devices, so ${computerId} cannot be ` +
+      "given a GPU. Allow them on the project and re-run the allocation:\n" +
+      "  incus project set <project> restricted.devices.gpu=allow\n" +
+      "If the project is restricted at all, this is the default and the key must be " +
+      "set explicitly. Verify before allocating rather than during: " +
+      "incus project get <project> | grep -i restricted"
+    );
+  }
+  return error instanceof Error ? error : new Error(message);
+}
+
+
 export class NvidiaWorkerAgent implements GpuWorkerAgent {
   constructor(private readonly run: CommandRunner) {}
 
@@ -91,18 +115,25 @@ export class NvidiaWorkerAgent implements GpuWorkerAgent {
     await this.incus([
       "config", "set", allocation.computerId, "nvidia.runtime=true"
     ]);
-    await this.incus([
-      "config", "device", "add", allocation.computerId,
-      deviceName(allocation.gpuUuid), "gpu", `id=${await this.gpuIndex(allocation.gpuUuid)}`
-    ]);
-    if (allocation.mode === "mps") {
-      // MPS clients reach the control daemon through its pipe directory, so it
-      // must be visible inside the container and named in the environment.
+    // Both device adds go through gpuDeviceError: a project that forbids gpu
+    // devices fails here, and MPS adds a second device that is refused the same
+    // way, so neither may surface as a bare Incus message.
+    try {
       await this.incus([
         "config", "device", "add", allocation.computerId,
-        mpsPipeDeviceName(allocation.gpuUuid), "disk",
-        `source=${MPS_PIPE_DIRECTORY}`, "path=/tmp/nvidia-mps"
+        deviceName(allocation.gpuUuid), "gpu", `id=${await this.gpuIndex(allocation.gpuUuid)}`
       ]);
+      if (allocation.mode === "mps") {
+        // MPS clients reach the control daemon through its pipe directory, so it
+        // must be visible inside the container and named in the environment.
+        await this.incus([
+          "config", "device", "add", allocation.computerId,
+          mpsPipeDeviceName(allocation.gpuUuid), "disk",
+          `source=${MPS_PIPE_DIRECTORY}`, "path=/tmp/nvidia-mps"
+        ]);
+      }
+    } catch (error) {
+      throw gpuDeviceError(error, allocation.computerId);
     }
     if (!hadRuntime) {
       await this.incus(["restart", allocation.computerId], 120_000);

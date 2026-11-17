@@ -80,6 +80,26 @@ export class CloudComputerStore {
     return this.get(id);
   }
 
+  /**
+   * Records that the guest agent bus was installed and verified.
+   *
+   * Read back only by agentAccess; `CloudComputer` deliberately does not carry
+   * the token, so it cannot leak into a list or a status response.
+   */
+  setGuestAgentToken(id: string, token: string): void {
+    this.get(id);
+    this.database.prepare(
+      "UPDATE cloud_computers SET guest_agent_token = ?, updated_at = ? WHERE id = ?"
+    ).run(token, new Date().toISOString(), id);
+  }
+
+  guestAgentToken(id: string): string | undefined {
+    const row = this.database.prepare(
+      "SELECT guest_agent_token FROM cloud_computers WHERE id = ?"
+    ).get(id) as { guest_agent_token?: string | null } | undefined;
+    return row?.guest_agent_token ?? undefined;
+  }
+
   nextDesktopPort(): number {
     const row = this.database.prepare(
       "SELECT COALESCE(MAX(desktop_port), 19999) + 1 AS port FROM cloud_computers"

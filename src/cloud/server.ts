@@ -14,6 +14,7 @@ import {
   type Caller
 } from "./accounts.js";
 import { IncusWorkerDriver } from "./incus-driver.js";
+import { GuestProvisioner } from "./guest-provisioner.js";
 import { CloudComputerService } from "./service.js";
 import { createSshCommandRunner } from "./ssh-command-runner.js";
 import { CloudComputerStore } from "./store.js";
@@ -410,11 +411,31 @@ async function main(): Promise<void> {
 
   const defaultWorker = `${targets[0].user}@${targets[0].host}`;
   const store = new CloudComputerStore(databasePath);
+  // Every computer is created with the desktop *and* the agent bus, so
+  // agent-access works on a fresh computer instead of pointing at a socket
+  // nothing is listening on. Opt out with SYNTRUM_GUEST_RUNTIME=false when the
+  // guest image is known to be provisioned already, or to keep create() fast.
+  const guestRuntimeEnabled = process.env.SYNTRUM_GUEST_RUNTIME !== "false";
   const service = new CloudComputerService({
     store,
     driver: drivers.get(defaultWorker)!,
     drivers,
     workerHost: defaultWorker,
+    ...(guestRuntimeEnabled
+      ? {
+          guestProvisioner: new GuestProvisioner(
+            // Routed through the computer's own worker, not the default: with
+            // several workers an install aimed at the wrong host would fail
+            // with "instance not found" for every computer on the others.
+            (id, args, timeoutMs) =>
+              drivers.get(store.get(id).workerHost)!.execute!(id, args, timeoutMs),
+            Boolean(aptConf)
+          ),
+          ...(process.env.SYNTRUM_GUEST_NODE_VERSION
+            ? { guestNodeVersion: process.env.SYNTRUM_GUEST_NODE_VERSION }
+            : {})
+        }
+      : {}),
     desktopEnabled: process.env.SYNTRUM_DESKTOP_ENABLED !== "false"
   });
   const gpuScheduler = new GpuScheduler(new GpuStore(databasePath), store, gpuAgents);

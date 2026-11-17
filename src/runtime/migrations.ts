@@ -218,4 +218,21 @@ export const migrations: Migration[] = [
         ON cloud_computers(owner_id, created_at);
     `
   },
+  {
+    version: 8,
+    name: "guest_bus_agent_grant",
+    sql: `
+      -- The guest bus is provisioned during create(), so a computer can report
+      -- whether its socket is really there. Presence of this token *is* the
+      -- readiness signal: installBus verifies the unit is active, the socket
+      -- exists and the daemon printed its ready line before create() returns,
+      -- so a stored token means "provisioned and verified", never "attempted".
+      --
+      -- Stored in plaintext, unlike account tokens, for the same reason the
+      -- editor bridge token is: an agent has to be handed the credential to
+      -- authenticate, so a hash would be unusable. The guest holds the SHA-256
+      -- of it; this copy exists so agent-access can hand it out.
+      ALTER TABLE cloud_computers ADD COLUMN guest_agent_token TEXT;
+    `
+  },
 ];

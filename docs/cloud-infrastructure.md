@@ -12,6 +12,9 @@ The new `src/cloud/` subsystem is a real remote-worker driver, not a macOS proce
 - The API requires a high-entropy operator bearer token. `/health` is public and contains no secrets.
 - Cloud-init installs XFCE, x11vnc, websockify, and noVNC, then waits for completion before reporting `running`.
 - Browser access is noVNC through an SSH tunnel. No unauthenticated public VNC endpoint is created.
+- **Every computer is created with its guest agent bus.** `create()` installs Node and the bus daemon after the container is up, and only reports `running` once `installBus` has proved the unit active, the socket present and the daemon ready. `GET /computers/<id>/agent-access` therefore works on a fresh computer; it returns `409 GUEST_BUS_NOT_PROVISIONED` when a computer has no bus, rather than a socket path nothing is listening on. Set `SYNTRUM_GUEST_RUNTIME=false` to skip the install, or `SYNTRUM_GUEST_NODE_VERSION` to pin a different Node.
+
+The daemon's JavaScript is compiled on the control-plane host and pushed **through the guest**: `incus file push <src>` resolves its source on the *worker*, which the control plane cannot assume it can write to, so the tree is tarred locally and streamed in as base64 chunks. A failed install leaves the computer in `error`, never `running`.
 
 ## Resource model
 
@@ -100,7 +103,8 @@ curl -X DELETE -H "Authorization: Bearer $CLOUD_AI_OS_OPERATOR_TOKEN" \
 
 - `IMPLEMENTED BUT NOT VERIFIED`: real Linux Incus creation, start/stop/restart/destroy, cloud-init desktop boot, persistent workspace, and noVNC browser access. The driver and API exist, but no remote worker is configured.
 - `VERIFIED`: non-live command construction, resource/storage configuration, durable lifecycle transitions, operator authorization, and SSH-tunnel access responses. Full suite: **50 passed, 0 failed, 1 skipped**.
-- `NOT IMPLEMENTED`: Linux guest packaging of the SYNTRUM MCP runtime, strong microVM isolation, WebRTC, shared GPU scheduling, checkpoint/restore, and production orchestration.
+- `NOT IMPLEMENTED`: strong microVM isolation, WebRTC, checkpoint/restore, and production orchestration.
+- `IMPLEMENTED BUT NOT VERIFIED`: Linux guest packaging of the SYNTRUM MCP runtime. `create()` now installs Node and the bus daemon and verifies the socket, but this has only been exercised on the reference worker by the acceptance harnesses — not by a `POST /computers` against a real worker.
 
 Incus system containers are the initial isolation mechanism, not VM-grade multi-tenancy. Production hostile-user isolation requires a separate microVM or stronger sandbox driver and its own escape tests.
 

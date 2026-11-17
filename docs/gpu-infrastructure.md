@@ -15,6 +15,17 @@ The `src/gpu/` subsystem contains an actual worker execution path, not just allo
 
 The workload API accepts no arbitrary shell command. The CUDA workload allocates and writes real GPU memory when run on compatible hardware.
 
+## Before renting a GPU worker
+
+A restricted Incus project blocks GPU passthrough by default: `restricted.devices.gpu` defaults to `block`, and the denial names neither the project nor the key. `bootstrap-worker.sh` runs `incus admin init --auto`, which leaves `restricted` off, so a box it prepares is fine — but a provider or tenant project may not be. Check before allocating rather than during:
+
+```sh
+incus project get default | grep -i restricted
+incus config device add probe gpu0 gpu id=0   # on a throwaway container
+```
+
+A blocked project now fails the allocation with the key to change (`restricted.devices.gpu=allow`), not a bare Incus message. Only that exact denial is translated; any other device failure is passed through unchanged, so an unrelated problem is not misreported as a policy issue.
+
 ## Guest CUDA runtime
 
 Two separate things have to be true inside a guest before a CUDA workload runs, and they come from different places:

@@ -1,10 +1,48 @@
 import { execFile } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { CUDA_PROBE_SOURCE, CUDA_RUNTIME_LIBRARY } from "../gpu/types.js";
 import { errorMessage } from "../runtime/errors.js";
 
 const runFile = promisify(execFile);
+
+/**
+ * Compiles the guest bus and its dependency closure to plain JavaScript.
+ *
+ * The guest has no toolchain and no npm access, and Node's own type-stripping
+ * cannot run the bus (it uses constructor parameter properties), so the daemon
+ * is compiled on the host and copied in. Shared by the acceptance harness and
+ * create(): the harness compiled its own copy before this existed, which meant
+ * a fix here could silently not reach the path an operator actually uses.
+ *
+ * `srcRoot` defaults to the process's working directory, which is where `tsc`
+ * resolves `--rootDir src` from when the control plane is started as `npm run
+ * cloud:dev`. Tests pass an explicit root so they never depend on the cwd.
+ */
+export async function compileGuestModules(
+  outputRoot: string,
+  options: { srcRoot?: string; timeoutMs?: number } = {}
+): Promise<{ directory: string; modules: string }> {
+  const outDir = join(outputRoot, "compiled");
+  await runFile("npx", [
+    "tsc", "--outDir", outDir, "--rootDir", "src",
+    "--module", "NodeNext", "--moduleResolution", "NodeNext", "--target", "ES2022"
+  ], {
+    timeout: options.timeoutMs ?? 300_000,
+    ...(options.srcRoot ? { cwd: options.srcRoot } : {})
+  });
+  // Only the directories the daemon imports are shipped; the rest of the host
+  // runtime would be dead weight inside the guest.
+  for (const relative of ["guest", "bus", "adapters"]) {
+    await mkdir(join(outDir, relative), { recursive: true });
+  }
+  // Without this the guest treats the compiled .js as CommonJS and the daemon
+  // dies on its first import.
+  await writeFile(join(outDir, "package.json"), JSON.stringify({ type: "module" }, null, 2));
+  return { directory: outDir, modules: "guest/bus-daemon" };
+}
 
 // Phase 4 groundwork: the guest runtime needs Node >= 26 (it uses node:sqlite,
 // absent from the Ubuntu 24.04 nodejs package at 18.19), so the guest must
@@ -228,6 +266,11 @@ export class GuestProvisioner {
     private readonly execute: GuestExecutor,
     private readonly aptDateCheckDisabled = false
   ) {}
+
+  /** Compiles the guest daemon's closure on the host, ready to upload. */
+  compile(outputRoot: string): Promise<{ directory: string; modules: string }> {
+    return compileGuestModules(outputRoot);
+  }
 
   // Reads the guest's own architecture rather than assuming the worker's, so a
   // mismatched download fails loudly instead of installing a binary that

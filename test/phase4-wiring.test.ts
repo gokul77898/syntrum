@@ -43,6 +43,38 @@ function driver(overrides: Partial<WorkerDriver> = {}): WorkerDriver {
   };
 }
 
+/**
+ * A provisioner that records what it was asked to install without compiling
+ * anything or touching a guest. `compile` is what the real one shells out to
+ * `tsc` for; a double here keeps these tests offline and fast.
+ */
+function fakeProvisioner(options: { upload?: boolean } = {}) {
+  const calls: string[] = [];
+  let agents: readonly { id: string; token: string }[] = [];
+  return {
+    calls,
+    get agents() { return agents; },
+    async compile(outputRoot: string) {
+      calls.push("compile");
+      return { directory: outputRoot, modules: "guest/bus-daemon" };
+    },
+    async installNode(id: string, version: string) {
+      calls.push(`installNode:${id}:${version}`);
+    },
+    async installBus(id: string, busOptions: {
+      compiledDirectory: string;
+      agents: readonly { id: string; token: string }[];
+      upload: (id: string, local: string, remote: string) => Promise<void>;
+    }) {
+      calls.push(`installBus:${id}`);
+      agents = busOptions.agents;
+      if (options.upload) {
+        await busOptions.upload(id, busOptions.compiledDirectory, "/opt/syntrum");
+      }
+    }
+  };
+}
+
 // ── The socket path the worker exposes ───────────────────────────────────
 
 test("the agent socket path is derived from the computer id", () => {
@@ -148,7 +180,8 @@ test("destroying a computer removes the bus device and its stale socket", async 
 test("agent access reports the socket path and workspace", async t => {
   const path = database();
   const service = new CloudComputerService({
-    store: new CloudComputerStore(path), driver: driver(), workerHost: "gokul@worker"
+    store: new CloudComputerStore(path), driver: driver(), workerHost: "gokul@worker",
+    guestProvisioner: fakeProvisioner()
   });
   t.after(() => { service.close(); rmSync(path, { recursive: true, force: true }); });
 
@@ -158,12 +191,16 @@ test("agent access reports the socket path and workspace", async t => {
   assert.equal(access.workspaceId, "main");
   assert.equal(access.workspaceRoot, "/workspace");
   assert.equal(access.publicExposure, false);
+  // The bus demands a grant, so the credential has to come back with the route.
+  assert.equal(access.agent.id, computer.id);
+  assert.ok(access.agent.token.length >= 16);
 });
 
 test("agent access requires a running computer", async t => {
   const path = database();
   const service = new CloudComputerService({
-    store: new CloudComputerStore(path), driver: driver(), workerHost: "gokul@worker"
+    store: new CloudComputerStore(path), driver: driver(), workerHost: "gokul@worker",
+    guestProvisioner: fakeProvisioner()
   });
   t.after(() => { service.close(); rmSync(path, { recursive: true, force: true }); });
 
@@ -200,7 +237,8 @@ test("the agent-access route is reachable and scoped over HTTP", async t => {
   const path = database();
   const accounts = new AccountStore(path);
   const service = new CloudComputerService({
-    store: new CloudComputerStore(path), driver: driver(), workerHost: "gokul@worker"
+    store: new CloudComputerStore(path), driver: driver(), workerHost: "gokul@worker",
+    guestProvisioner: fakeProvisioner()
   });
   const operatorToken = "dev-operator-token-32-characters-minimum-xyz";
   const server = createCloudHttpServer({ service, accountStore: accounts, operatorToken });

@@ -257,6 +257,47 @@ test("a guest without the CUDA runtime is refused before the workload runs", asy
   );
 });
 
+test("a restricted project's GPU denial names the key to change", async () => {
+  const commands: string[][] = [];
+  const agent = new NvidiaWorkerAgent(async args => {
+    commands.push([...args]);
+    if (args[1] === "config" && args[2] === "get") return "true";
+    if (args.includes("--query-gpu=mig.mode.current")) return "Disabled";
+    if (args[0] === "nvidia-smi" && String(args[1]).startsWith("--query-gpu=")) {
+      return "GPU-abc123def456, 0, NVIDIA T4, 16384, 0, 0, 40";
+    }
+    // Incus's own message, which names neither the project nor the key.
+    if (args.includes("gpu")) throw new Error("GPU devices are forbidden");
+    return "";
+  });
+  // restricted.devices.gpu defaults to `block`, so this is the first thing a
+  // rented box hits and the raw message costs an hour to interpret.
+  await assert.rejects(
+    agent.execute(gpuAllocation()),
+    (error: Error) => {
+      assert.match(error.message, /restricted\.devices\.gpu=allow/);
+      assert.match(error.message, /incus project set/);
+      assert.match(error.message, /forbids gpu devices/);
+      return true;
+    }
+  );
+});
+
+test("a GPU failure that is not a policy denial is passed through unchanged", async () => {
+  const agent = new NvidiaWorkerAgent(async args => {
+    if (args[1] === "config" && args[2] === "get") return "true";
+    if (args.includes("--query-gpu=mig.mode.current")) return "Disabled";
+    if (args[0] === "nvidia-smi" && String(args[1]).startsWith("--query-gpu=")) {
+      return "GPU-abc123def456, 0, NVIDIA T4, 16384, 0, 0, 40";
+    }
+    if (args.includes("gpu")) throw new Error("Storage pool is out of space");
+    return "";
+  });
+  // Translating an unrelated failure into a policy message would send the
+  // operator to the wrong fix.
+  await assert.rejects(agent.execute(gpuAllocation()), /Storage pool is out of space/);
+});
+
 // ── 3. Architecture assumptions ──────────────────────────────────────────
 
 test("libatomic is requested only where Node actually needs it", () => {

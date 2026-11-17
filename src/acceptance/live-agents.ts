@@ -29,7 +29,8 @@ import {
   createSshCommandRunner,
   guestSocketPath,
   isIncusNotFound,
-  GuestBusClient
+  GuestBusClient,
+  compileGuestModules
 } from "../cloud/index.js";
 import { errorMessage } from "../runtime/errors.js";
 
@@ -93,7 +94,8 @@ async function main(): Promise<void> {
 
     // Compile the guest daemon on this host: the guest has no toolchain, and
     // Node's type stripping cannot run the bus (it uses constructor parameter
-    // properties). The compiled output has no dependencies.
+    // properties). Shared with create()'s own provisioning so a fix to either
+    // path cannot leave the other behind.
     const compiled = await compileGuestModules(dataRoot);
     evidence.compiledModules = compiled.modules;
 
@@ -244,25 +246,6 @@ async function main(): Promise<void> {
 
 async function copyDirectory(from: string, to: string): Promise<void> {
   await cp(from, to, { recursive: true });
-}
-
-/** Compiles the bus and its closure to plain JavaScript for the guest. */
-async function compileGuestModules(dataRoot: string): Promise<{ directory: string; modules: string }> {
-  const outDir = join(dataRoot, "compiled");
-  const { stderr } = await runFile("npx", [
-    "tsc", "--outDir", outDir, "--rootDir", "src",
-    "--module", "NodeNext", "--moduleResolution", "NodeNext", "--target", "ES2022"
-  ], { timeout: 300_000 });
-  if (stderr.trim()) {
-    evidence.tscWarnings = stderr.trim().split("\n").slice(0, 3);
-  }
-  // Only the modules the daemon imports are shipped; the rest of the host
-  // runtime would be dead weight inside the guest.
-  for (const relative of ["guest", "bus", "adapters"]) {
-    await mkdir(join(outDir, relative), { recursive: true });
-  }
-  await writeFile(join(outDir, "package.json"), JSON.stringify({ type: "module" }, null, 2));
-  return { directory: outDir, modules: "guest/bus-daemon" };
 }
 
 await main();

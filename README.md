@@ -143,7 +143,9 @@ The control plane reads SSH and worker settings from the environment. **No hostn
 | `SYNTRUM_WORKER_SSH_USER` | SSH user on the worker |
 | `SYNTRUM_WORKERS` | Optional comma-separated `user@host` list to drive **several** workers. The first entry is the default a computer is created on, and `POST /computers` may name any registered worker with `workerHost`. Falls back to the pair above. |
 | `SYNTRUM_WORKER_SSH_KNOWN_HOSTS` | Path to a `known_hosts` file (host key verification is enforced) |
-| `SYNTRUM_WORKER_SSH_IDENTITY_FILE` | Path to an SSH private key |
+| `SYNTRUM_WORKER_SSH_IDENTITY_FILE` | Path to an SSH private key. **Setting this adds `-o IdentitiesOnly=yes`, which overrides a `Host` alias's own `IdentityFile`** — leave it unset to let `~/.ssh/config` govern, e.g. for a worker on a non-standard port reached through an alias. |
+| `SYNTRUM_GUEST_RUNTIME` | Set to `false` to skip installing Node + the bus daemon during `create()`. Installed by default, so a new computer's `agent-access` route works immediately. |
+| `SYNTRUM_GUEST_NODE_VERSION` | Node version for the guest runtime (default `v26.13.0`). |
 | `CLOUD_AI_OS_OPERATOR_TOKEN` | Operator bearer token, **≥ 32 characters**. Required to start the cloud API. |
 
 The operator token file is `.syntrum-operator-token` (gitignored). Generate one with:
@@ -229,7 +231,7 @@ Three rules the suite follows:
 
 - **The provisioned desktop is unproven.** The working desktop was assembled manually. `desktopCloudInit()` in `src/cloud/incus-driver.ts` writes the right systemd units but has never completed a full run, so the desktop does not survive a container restart yet.
 - **No desktop gateway.** Reaching the desktop currently requires a hand-opened SSH tunnel. Phase 6 replaces this.
-- **Guest MCP runtime does not exist.** Agents currently drive the *host's* editor, not the guest's.
+- **The guest agent bus is installed by `create()`, but its only live proof is the acceptance harness.** `npm run test:live-agents` drives a real guest end to end; a `POST /computers` against a real worker has not been run since the install was wired in. The MCP server still runs on the host, not in the guest.
 - **`diskGb` is not enforced** (see the storage note above).
 - **A worker with a skewed clock** breaks `apt` and TLS. Not a SYNTRUM bug, but it will bite you.
 - **GPU paths are unexercised on real hardware.** The GPU modules are written against an NVIDIA worker agent and `npm run test:live-gpu` is the gate, but no NVIDIA box has been rented yet, so live CUDA remains `IMPLEMENTED BUT NOT VERIFIED`. `nvidia.runtime` is not a live-updatable Incus option, so the **first** GPU allocation on a computer restarts it to mount the host driver libraries; later allocations do not.

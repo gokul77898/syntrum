@@ -78,6 +78,34 @@ export type ForkComputerInput = {
   desktopEnabled?: boolean;
 };
 
+/**
+ * Installs the in-guest agent runtime during create().
+ *
+ * Deliberately an interface, not a concrete class: `GuestProvisioner` needs a
+ * guest executor and a byte-upload strategy, and the service should not have to
+ * know whether those are scp, a pipe over ssh, or a test double. This is the
+ * same seam `installBus`'s `upload` option already uses.
+ */
+export interface GuestRuntimeProvisioner {
+  /**
+   * Produces the daemon's compiled JavaScript on the host.
+   *
+   * Part of this interface, not of the service: it is the one step that shells
+   * out to a real compiler, and keeping it here is what lets a test double
+   * provision a guest without spawning `tsc`.
+   */
+  compile(outputRoot: string): Promise<{ directory: string; modules: string }>;
+  installNode(id: string, version: string): Promise<unknown>;
+  installBus(
+    id: string,
+    options: {
+      compiledDirectory: string;
+      agents: readonly { id: string; token: string }[];
+      upload: (id: string, localDirectory: string, remoteDirectory: string) => Promise<void>;
+    }
+  ): Promise<unknown>;
+}
+
 export type CommandRunner = (
   args: readonly string[],
   timeoutMs?: number,

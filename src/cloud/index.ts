@@ -5,6 +5,7 @@ export {
   nodeRuntimePackages,
   resolveNodePlatform,
   cudaRuntimeScript,
+  compileGuestModules,
   CUDA_RUNTIME_PACKAGES,
   GUEST_BUS_MODULES,
   GUEST_BUS_UNIT
