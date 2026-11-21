@@ -186,6 +186,14 @@ write_files:
       set -u
       export DISPLAY=${DESKTOP_DISPLAY}
 
+      # A zero-byte loaders.cache ships on this image, and gdk-pixbuf registers
+      # every non-builtin format (jpeg, png, svg) through that file alone. Empty
+      # means no wallpaper format decodes and the root window stays black, so
+      # rebuild it before anything tries to paint. Runs as root: it is root-owned.
+      cache=$(find /usr/lib -path '*/gdk-pixbuf-2.0/*/loaders.cache' | head -1)
+      query=$(find /usr/lib -name gdk-pixbuf-query-loaders -type f | head -1)
+      if [ -n "$cache" ] && [ -n "$query" ]; then "$query" > "$cache"; fi
+
       as_user() { su syntrum -c "HOME=/home/syntrum DISPLAY=${DESKTOP_DISPLAY} $1"; }
 
       # xfconf writes the per-channel XML itself, so this works with no daemon
@@ -216,17 +224,26 @@ write_files:
         chown syntrum:syntrum /home/syntrum/.config/gtk-$v/settings.ini
       done
 
-      # Backdrop: a solid colour, because no SVG pixbuf loader is installed and
-      # the stock xfce-shapes.svg wallpaper therefore paints nothing at all.
+      # Backdrop: a real image, which needs the rebuilt loaders.cache above.
+      # xfce-blue.jpg ships with xfdesktop4-data; image-style 5 is zoomed-fill.
       as_user '
         for ws in workspace0 workspace1 workspace2 workspace3; do
           p=/backdrop/screen0/monitorscreen/$ws
-          xfconf-query -c xfce4-desktop -p $p/image-style -s 0 -t int --create
+          xfconf-query -c xfce4-desktop -p $p/last-image --create \
+            -s /usr/share/backgrounds/xfce/xfce-blue.jpg
+          xfconf-query -c xfce4-desktop -p $p/image-style -s 5 -t int --create
           xfconf-query -c xfce4-desktop -p $p/color-style -s 0 -t int --create
           xfconf-query -c xfce4-desktop -p $p/rgba1 --create \
             -s 0.113 -t double -s 0.125 -t double -s 0.145 -t double -s 1.0 -t double
         done
       '
+
+      # The workspace volume mounts root-owned and 0711, which the desktop user
+      # cannot even list — Thunar on /workspace dies on a GLib critical and never
+      # opens a window. Ownership goes to the session user; the bus daemon runs
+      # as root and keeps access regardless.
+      chown syntrum:syntrum /workspace 2>/dev/null || true
+      chmod 755 /workspace 2>/dev/null || true
 
       install -d -o syntrum -g syntrum /home/syntrum/.local/share/applications
       install -d -o syntrum -g syntrum /home/syntrum/.config/autostart

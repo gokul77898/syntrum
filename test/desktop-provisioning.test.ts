@@ -229,15 +229,29 @@ test("the desktop packages needed for that theme are installed", async () => {
   }
 });
 
-// A solid backdrop, not the stock SVG: no SVG pixbuf loader is installed in
-// this image, so xfce-shapes.svg paints nothing and the root window stays black.
-test("the backdrop is a solid colour rather than an unloadable SVG", async () => {
+// The image ships a zero-byte loaders.cache, and gdk-pixbuf registers jpeg/png
+// through that file alone — so every wallpaper format decoded to nothing and the
+// root window stayed black. The theme script rebuilds it before painting.
+test("the pixbuf loader cache is rebuilt before a wallpaper is set", async () => {
   const calls: string[][] = [];
   await new IncusWorkerDriver(runner(calls)).create(spec);
   const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
-  assert.match(cloudInit, /image-style -s 0 -t int --create/);
-  assert.match(cloudInit, /rgba1 --create/);
-  assert.doesNotMatch(cloudInit, /last-image -s .*\.svg/);
+  const rebuild = cloudInit.indexOf("gdk-pixbuf-query-loaders");
+  const wallpaper = cloudInit.indexOf("last-image");
+  assert.ok(rebuild >= 0, "the cache is rebuilt");
+  assert.ok(wallpaper >= 0, "an image wallpaper is set");
+  assert.ok(rebuild < wallpaper, "the cache exists before anything paints");
+  assert.match(cloudInit, /last-image[^\n]*xfce-blue\.jpg/);
+});
+
+// The workspace volume mounts root-owned and 0711, which the desktop user
+// cannot list, so Thunar on /workspace never opens a window.
+test("the theme script hands /workspace to the desktop user", async () => {
+  const calls: string[][] = [];
+  await new IncusWorkerDriver(runner(calls)).create(spec);
+  const cloudInit = calls.find(args => args.includes("cloud-init.user-data"))?.at(-1) ?? "";
+  assert.match(cloudInit, /chown syntrum:syntrum \/workspace/);
+  assert.match(cloudInit, /chmod 755 \/workspace/);
 });
 
 // XFCE keeps its session when no session manager answers, so the default 90s
